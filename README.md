@@ -14,6 +14,9 @@ Interactive analysis platform for CO2M literature corpus with concept mapping, t
 * Real-time filtering by scientific concept, year, and keywords
 * Corpus statistics (47 PDFs, 3689 chunks, 2104 concept assignments)
 
+<img width="2880" height="1618" alt="image" src="https://github.com/user-attachments/assets/ae9c399c-eaa0-4466-9b94-e4e1f34eba9e" />
+
+
 ## Structure
 
 * `ingestion/` Data ingestion (papers, datasets, structures)
