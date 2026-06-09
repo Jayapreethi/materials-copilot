@@ -1,0 +1,105 @@
+# Concept taxonomy for CO2M Literature Intelligence Pipeline
+# Each top-level key is a concept name.
+# Each value is a list of keywords used to classify document chunks.
+# Keywords are case-insensitive and support partial phrase matching.
+
+CO2 monitoring:
+  - carbon dioxide
+  - co2 monitoring
+  - greenhouse gas
+  - ghg monitoring
+  - atmospheric co2
+  - emissions monitoring
+  - co2 concentration
+  - carbon flux
+
+Remote sensing:
+  - satellite
+  - remote sensing
+  - spectrometer
+  - earth observation
+  - lidar
+  - radar
+  - hyperspectral
+  - multispectral
+  - sentinel
+  - landsat
+  - modis
+  - tropomi
+
+Climate modeling:
+  - climate model
+  - weather model
+  - climate simulation
+  - forecast
+  - numerical weather
+  - gcm
+  - reanalysis
+  - era5
+  - cmip
+  - radiative forcing
+
+Machine learning:
+  - machine learning
+  - deep learning
+  - neural network
+  - prediction
+  - classification
+  - regression
+  - random forest
+  - convolutional
+  - transformer
+  - feature extraction
+  - training data
+  - artificial intelligence
+
+Policy and emissions:
+  - policy
+  - emissions inventory
+  - regulation
+  - mitigation
+  - net zero
+  - paris agreement
+  - carbon budget
+  - nationally determined
+  - ndc
+  - climate target
+  - decarbonization
+
+Carbon capture:
+  - carbon capture
+  - carbon storage
+  - sequestration
+  - ccs
+  - carbon sink
+  - direct air capture
+  - enhanced weathering
+  - geological storage
+  - biomass energy
+  - beccs
+
+Atmospheric chemistry:
+  - atmospheric chemistry
+  - troposphere
+  - stratosphere
+  - aerosol
+  - methane
+  - nitrous oxide
+  - ozone
+  - hydroxyl radical
+  - ch4
+  - n2o
+  - trace gas
+
+Measurement and instrumentation:
+  - measurement
+  - instrument
+  - sensor
+  - calibration
+  - in situ
+  - flask sampling
+  - fourier transform
+  - ftir
+  - spectrometry
+  - data quality
+  - uncertainty
