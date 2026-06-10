@@ -6,7 +6,10 @@ A RAG-powered copilot for materials science workflows will have various features
 
 Interactive analysis platform for CO2M literature corpus with concept mapping, temporal trends, and document retrieval.
 
-![Dashboard Overview](docs/dashboard-overview.png)
+<img width="1642" height="913" alt="image" src="https://github.com/user-attachments/assets/c0b2b701-4643-48fc-8b9b-1f1caa2df708" />
+
+
+#![Dashboard Overview](docs/dashboard-overview.png)
 
 **Features:**
 * Stacked area visualization of research activity trends across concepts
