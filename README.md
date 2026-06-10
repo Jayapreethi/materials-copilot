@@ -1,6 +1,6 @@
 # materials-copilot
 
-A RAG-powered copilot for materials science workflows.
+Materials Copilot is a modular scientific literature intelligence system composed of three interoperable applications: an offline PDF intelligence pipeline, a vector-based RAG retrieval service, and a chat-based research agent.
 
 ## CO2M Literature Intelligence System
 
