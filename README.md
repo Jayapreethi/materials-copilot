@@ -44,7 +44,7 @@ cd hpc_tools/ && sbatch submit_ingestion.sh
 
 **Jaya Preethi Mohan**
 
-PhD Candidate, Computer Science — University of North Dakota
+Doctoral Researcher, Computer Science — University of North Dakota
 
 Former Computer Scientist, Advanced Computing Team — Pacific Northwest National Laboratory
 
