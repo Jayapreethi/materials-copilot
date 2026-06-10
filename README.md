@@ -1,8 +1,8 @@
 # materials-copilot
 
-A RAG-powered copilot for materials science workflows will have various features and tools for chem researchers. One of the tools in copilot is the CO2M literature Intelligence dashboard.
+A RAG-powered copilot for materials science workflows will have various features and tools for chem researchers. One of the tools in copilot is the CO2M literature Intelligence System.
 
-## CO2M Literature Intelligence Dashboard
+  ## CO2M Literature Intelligence System
 
 Interactive analysis platform for CO2M literature corpus with concept mapping, temporal trends, and document retrieval.
 
