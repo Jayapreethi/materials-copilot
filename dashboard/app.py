@@ -5,7 +5,9 @@ Run: streamlit run co2m_lit_dashboard/dashboard/app.py
 """
 
 import json
+import logging
 import re
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -16,11 +18,23 @@ from sklearn.decomposition import PCA
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import normalize
 
+# Configure logging
+logger = logging.getLogger(__name__)
+
+# Add project root to path for imports
+_HERE = Path(__file__).parent
+PROJECT_ROOT = _HERE.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+# RAG Pipeline imports
+from rag_pipeline.query_service import RAGQueryService
+from rag_pipeline.verification import RAGVerification
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-_HERE = Path(__file__).parent
-ARTIFACTS_DIR = _HERE.parent.parent / "co2m" / "artifacts"
+ARTIFACTS_DIR = PROJECT_ROOT / "co2m" / "artifacts"
 
 # ---------------------------------------------------------------------------
 # Page config  (must be first Streamlit call)
@@ -303,7 +317,8 @@ st.markdown(f'<div class="co2m-summary">{summary_text}</div>', unsafe_allow_html
 # ===========================================================================
 # TABBED NAVIGATION
 # ===========================================================================
-tab_overview, tab_science, tab_deepdive, tab_domain, tab_compare, tab_docs, tab_snippets = st.tabs([
+tab_rag, tab_overview, tab_science, tab_deepdive, tab_domain, tab_compare, tab_docs, tab_snippets, tab_verify = st.tabs([
+    "Semantic Search",
     "Corpus Overview",
     "Scientific Insights",
     "Concept Deep Dive",
@@ -311,7 +326,287 @@ tab_overview, tab_science, tab_deepdive, tab_domain, tab_compare, tab_docs, tab_
     "Cross-Concept",
     "Documents",
     "Source Snippets",
+    "System Verification",
 ])
+
+# ============================================================
+# TAB 0 — Semantic Search
+# ============================================================
+with tab_rag:
+    st.markdown("### Semantic Search")
+
+    # Initialize service (cached)
+    @st.cache_resource
+    def get_query_service():
+        """Load query service once."""
+        try:
+            service = RAGQueryService(
+                embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+                vector_store_path=str(PROJECT_ROOT / "vector_db" / "data"),
+                collection_name="co2m_corpus",
+                device="cpu",
+            )
+            return service
+        except Exception as e:
+            st.error(f"Failed to initialize RAG system: {e}")
+            st.info("Make sure the vector database is populated. Run: `python ingest_enhanced.py`")
+            raise
+
+    try:
+        query_service = get_query_service()
+        stats = query_service.get_stats()
+        st.info(f"Vector DB: {stats.get('total_documents', 0):,} documents indexed")
+    except Exception:
+        st.stop()
+
+    # Check LLM status
+    llm_status = query_service.get_llm_status()
+    
+    # Search input
+    query = st.text_input(
+        "Enter your question or search term:",
+        placeholder="e.g., 'CO2 capture materials', 'amine-based sorbents', 'separation efficiency'",
+        key="rag_query",
+    )
+
+    # Search parameters
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        top_k = st.slider("Results:", min_value=1, max_value=20, value=5, key="top_k_rag")
+    with col2:
+        include_context = st.checkbox("Context summary", value=True, key="include_context_rag")
+    with col3:
+        concept_filter = st.selectbox(
+            "Concept filter:",
+            options=["None"] + all_concepts,
+            key="concept_filter_rag",
+        )
+    
+    # LLM generation option
+    col_llm1, col_llm2 = st.columns(2)
+    with col_llm1:
+        use_llm = st.checkbox(
+            "Generate with AI",
+            value=True,
+            key="use_llm",
+            help="Use AI to generate a comprehensive answer based on retrieved documents"
+        )
+    
+    with col_llm2:
+        if llm_status.get("available"):
+            provider = llm_status.get('provider', 'unknown').title()
+            if llm_status.get('auto_detected'):
+                st.caption(f"✓ Auto-detected: {provider}")
+            else:
+                st.caption(f"✓ {provider}")
+        else:
+            st.caption("⚠️ AI not available. Install Ollama or set API keys for free/paid LLM access")
+    
+    if concept_filter == "None":
+        concept_filter = None
+
+    # Initialize session state for search results
+    if "search_results" not in st.session_state:
+        st.session_state.search_results = None
+    if "search_query" not in st.session_state:
+        st.session_state.search_query = None
+
+    # Execute search
+    search_button_col, clear_button_col = st.columns([4, 1])
+    with search_button_col:
+        search_clicked = st.button("Search", key="search_button", use_container_width=True)
+    with clear_button_col:
+        clear_clicked = st.button("Clear", key="clear_button", use_container_width=True)
+    
+    if clear_clicked:
+        st.session_state.search_results = None
+        st.session_state.search_query = None
+        st.rerun()
+    
+    if query and search_clicked:
+        try:
+            search_msg = "Searching with AI..." if llm_status.get("available") else "Searching semantically..."
+            with st.spinner(search_msg):
+                if llm_status.get("available"):
+                    results = query_service.generate_with_llm(
+                        question=query,
+                        top_k=top_k,
+                        concept_filter=concept_filter,
+                        temperature=0.7,
+                        max_tokens=500,
+                    )
+                else:
+                    results = query_service.query(
+                        question=query,
+                        top_k=top_k,
+                        concept_filter=concept_filter,
+                        include_context=include_context,
+                    )
+            # Store results in session state
+            st.session_state.search_results = results
+            st.session_state.search_query = query
+        except Exception as e:
+            st.error(f"Search failed: {str(e)}")
+            logger.error(f"Search error: {e}", exc_info=True)
+            st.session_state.search_results = None
+            st.stop()
+    
+    # Display stored results if available
+    if st.session_state.search_results:
+        results = st.session_state.search_results
+
+        # Display LLM response if available (regardless of current checkbox state, since results may have been generated with LLM)
+        if "llm_response" in results and results.get("llm_response"):
+            st.markdown("---")
+            st.markdown("### 🤖 AI-Generated Answer")
+            
+            # Display the response as formatted markdown
+            try:
+                st.markdown(results['llm_response'])
+            except Exception as e:
+                st.text(results['llm_response'])
+            
+            # Show LLM metadata in a collapsible section
+            with st.expander("Response Details", expanded=False):
+                info_cols = st.columns(3)
+                with info_cols[0]:
+                    provider = results.get("llm_provider", "N/A")
+                    st.metric("Provider", provider.title())
+                with info_cols[1]:
+                    model = results.get("llm_model", "N/A")
+                    st.metric("Model", model.split("/")[-1][:20])  # Shorten long model names
+                with info_cols[2]:
+                    tokens = results.get("llm_usage", {}).get("total_tokens", results.get("llm_usage", {}).get("tokens", 0))
+                    st.metric("Tokens", tokens if tokens else "N/A")
+            
+            # Show sources used
+            if results.get("llm_sources"):
+                with st.expander("Sources Used in Answer", expanded=False):
+                    for i, source in enumerate(results["llm_sources"][:5], 1):
+                        file = source.get('file', 'Unknown')
+                        page = source.get('page', 'N/A')
+                        sim = source.get('similarity', 0)
+                        st.caption(f"{i}. {file} (Page {page}) — {sim:.1%} match")
+            
+            st.markdown("---")
+
+        # Display results summary
+        col_r1, col_r2, col_r3 = st.columns(3)
+        with col_r1:
+            st.metric("📄 Documents Found", results.get('num_results', 0))
+        with col_r2:
+            summary = results.get("context_summary", {})
+            st.metric("📊 Unique Sources", summary.get('unique_documents', 0))
+        with col_r3:
+            avg_sim = summary.get('avg_similarity', 0)
+            st.metric("📈 Match Score", f"{avg_sim:.1%}")
+
+        # Display summary if context was generated
+        if "context_summary" in results and results.get("context_summary"):
+            summary = results["context_summary"]
+            with st.expander("Summary Statistics", expanded=True):
+                scol1, scol2, scol3, scol4 = st.columns(4)
+                with scol1:
+                    st.metric("Results", summary.get("total_results", 0))
+                with scol2:
+                    st.metric("Unique Docs", summary.get("unique_documents", 0))
+                with scol3:
+                    st.metric("Avg Similarity", f"{summary.get('avg_similarity', 0):.3f}")
+                with scol4:
+                    st.metric("Materials", summary.get("materials_found", 0))
+
+                if "co2_uptake_stats" in summary and summary["co2_uptake_stats"]:
+                    co2_stats = summary["co2_uptake_stats"]
+                    st.markdown("**CO₂ Uptake (mmol/g)**")
+                    co2col1, co2col2, co2col3 = st.columns(3)
+                    with co2col1:
+                        st.metric("Avg", f"{co2_stats.get('avg', 0):.2f}")
+                    with co2col2:
+                        st.metric("Min", f"{co2_stats.get('min', 0):.2f}")
+                    with co2col3:
+                        st.metric("Max", f"{co2_stats.get('max', 0):.2f}")
+
+        # Display visualizations
+        result_list = results.get("results", [])
+        if result_list:
+            st.markdown("### Result Visualizations")
+            
+            viz_cols = st.columns(2)
+            
+            # Plot 1: Similarity Distribution
+            with viz_cols[0]:
+                similarity_data = [r.get("similarity", 0) for r in result_list]
+                ranks = [r.get("rank", i+1) for i, r in enumerate(result_list)]
+                
+                fig_sim = px.bar(
+                    x=ranks,
+                    y=similarity_data,
+                    labels={"x": "Result Rank", "y": "Similarity Score"},
+                    title="Semantic Similarity by Result",
+                    color=similarity_data,
+                    color_continuous_scale="Viridis"
+                )
+                fig_sim.update_layout(height=300, showlegend=False)
+                st.plotly_chart(fig_sim, use_container_width=True)
+            
+            # Plot 2: Source Distribution
+            with viz_cols[1]:
+                source_counts = {}
+                for r in result_list:
+                    fname = r.get("filename", "Unknown")
+                    source_counts[fname] = source_counts.get(fname, 0) + 1
+                
+                fig_src = px.pie(
+                    names=list(source_counts.keys()),
+                    values=list(source_counts.values()),
+                    title="Results by Source Document"
+                )
+                fig_src.update_layout(height=300)
+                st.plotly_chart(fig_src, use_container_width=True)
+
+        # Display context
+        if "context" in results and results.get("context"):
+            with st.expander("Formatted Context", expanded=False):
+                st.text_area(
+                    "Context",
+                    value=results["context"],
+                    height=300,
+                    disabled=True,
+                    label_visibility="collapsed",
+                )
+
+        # Display individual results
+        if result_list:
+            st.markdown("#### Detailed Results")
+            for result in result_list:
+                with st.container():
+                    rcol1, rcol2 = st.columns([1, 4])
+                    with rcol1:
+                        similarity_pct = result.get("similarity", 0) * 100
+                        st.metric(f"#{result.get('rank', '?')}", f"{similarity_pct:.0f}%")
+                    with rcol2:
+                        st.markdown(
+                            f"**{result.get('filename', 'Unknown')}** (Page {result.get('page_number', '?')})\n\n"
+                            f"*{result.get('text', '')[:300]}...*"
+                        )
+                        if result.get("material_name"):
+                            st.caption(f"Material: {result['material_name']}")
+                        if result.get("co2_uptake_mmol_g"):
+                            st.caption(f"CO₂ Uptake: {result['co2_uptake_mmol_g']} mmol/g")
+                    st.divider()
+
+
+    # Example queries
+    with st.expander("Example Queries", expanded=False):
+        st.markdown(
+            """
+            - What materials capture CO2 efficiently?
+            - Compare amine and metal-organic frameworks
+            - What are recent advances in sorption?
+            - How does CO2 uptake vary by material?
+            - What is the role of surface area in capture?
+            """
+        )
 
 # ============================================================
 # TAB 1 — Corpus Overview
@@ -1033,3 +1328,202 @@ with tab_snippets:
                     f'</div>',
                     unsafe_allow_html=True,
                 )
+
+# ============================================================
+# TAB 8 — System Verification
+# ============================================================
+with tab_verify:
+    st.markdown("### System Verification")
+    st.caption("Evaluate RAG pipeline health and performance")
+    
+    # Initialize verification (cached)
+    @st.cache_resource
+    def get_verification_service():
+        """Initialize verification service."""
+        try:
+            service = get_query_service()
+            verifier = RAGVerification(query_service=service)
+            return verifier
+        except Exception as e:
+            st.error(f"Failed to initialize verification: {e}")
+            raise
+    
+    try:
+        verifier = get_verification_service()
+        
+        # Run verification button
+        col1, col2 = st.columns([3, 1])
+        
+        with col2:
+            if st.button("Run Verification", key="verify_btn", use_container_width=True):
+                st.session_state.verification_results = None
+        
+        # Run verification if requested or display cached results
+        if "verification_results" not in st.session_state:
+            st.session_state.verification_results = verifier.run_all_verifications()
+        
+        results = st.session_state.verification_results
+        
+        # Display overall status
+        overall_status = results.get("overall_status", "unknown")
+        status_color = {
+            "healthy": "#10B981",
+            "degraded": "#F59E0B",
+            "failed": "#EF4444",
+        }.get(overall_status, "#6B7280")
+        
+        st.markdown(f"""
+        <div style="background-color:{status_color}20;border-left:4px solid {status_color};padding:12px;border-radius:4px;">
+        <div style="font-weight:600;color:{status_color};margin-bottom:4px;">System Status: {overall_status.upper()}</div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Display verification results in expandable sections
+        with st.expander("Vector Database Status", expanded=True):
+            vdb = results.get("vector_db", {})
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.metric("Documents Indexed", f"{vdb.get('document_count', 0):,}")
+            with col2:
+                st.metric("Status", vdb.get("status", "unknown").title())
+            with col3:
+                st.metric("Collection", vdb.get("collection_name", "unknown"))
+            
+            if vdb.get("error"):
+                st.error(f"Error: {vdb['error']}")
+        
+        with st.expander("Sample Query Test", expanded=False):
+            sq = results.get("sample_query", {})
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric("Query", sq.get("query", "N/A")[:30] + "...")
+            with col2:
+                st.metric("Results", sq.get("results_count", 0))
+            with col3:
+                st.metric("Latency", f"{sq.get('latency_ms', 0):.0f} ms")
+            with col4:
+                st.metric("Avg Similarity", f"{sq.get('avg_similarity', 0):.3f}")
+            
+            if sq.get("top_result_file"):
+                st.info(f"Top result: {sq['top_result_file']} ({sq['top_result_similarity']:.1%} match)")
+            
+            if sq.get("error"):
+                st.error(f"Error: {sq['error']}")
+        
+        with st.expander("Batch Query Test", expanded=False):
+            bq = results.get("batch_queries", {})
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric("Queries", bq.get("queries_count", 0))
+            with col2:
+                st.metric("Successful", bq.get("successful", 0))
+            with col3:
+                st.metric("Failed", bq.get("failed", 0))
+            with col4:
+                st.metric("Avg Latency", f"{bq.get('avg_latency_ms', 0):.1f} ms")
+            
+            st.metric("Avg Similarity", f"{bq.get('avg_similarity', 0):.3f}")
+            
+            if bq.get("errors"):
+                with st.expander("Errors"):
+                    for error in bq["errors"][:5]:
+                        st.caption(f"• {error}")
+        
+        with st.expander("Retrieval Quality Analysis", expanded=False):
+            rq = results.get("retrieval_quality", {})
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric("Samples Tested", rq.get("samples_tested", 0))
+            with col2:
+                st.metric("Avg Top Similarity", f"{rq.get('avg_top_result_similarity', 0):.3f}")
+            with col3:
+                st.metric("Min Similarity", f"{rq.get('min_similarity', 1.0):.3f}")
+            with col4:
+                st.metric("Max Similarity", f"{rq.get('max_similarity', 0):.3f}")
+            
+            st.metric("Median Similarity", f"{rq.get('median_similarity', 0):.3f}")
+            st.metric("Relevance Score", f"{rq.get('relevance_score', 0):.3f}")
+            
+            if rq.get("error"):
+                st.error(f"Error: {rq['error']}")
+        
+        # Get reliability score
+        reliability = results.get("reliability_score", {}) or {}
+        rel_score = reliability.get("score", 0)
+        rel_color = reliability.get("color", "#6B7280")
+        rel_status = reliability.get("status", "Unknown")
+        rel_breakdown = reliability.get("breakdown", "Run verification to calculate reliability score")
+        
+        # Display Reliability Score prominently
+        st.markdown("---")
+        st.markdown(f"""
+        <div style="background: linear-gradient(135deg, {rel_color}15 0%, {rel_color}30 100%); 
+                    border: 2px solid {rel_color}; padding: 24px; border-radius: 8px; text-align: center;">
+            <div style="font-size: 14px; color: {rel_color}; margin-bottom: 8px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px;">Reliability Score</div>
+            <div style="font-size: 48px; font-weight: 700; color: {rel_color}; margin-bottom: 8px;">{rel_score}%</div>
+            <div style="font-size: 16px; color: {rel_color}; font-weight: 600;">{rel_status}</div>
+            <div style="font-size: 12px; color: #6B7280; margin-top: 12px; line-height: 1.6;">
+                {rel_breakdown}
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Detailed component breakdown
+        if reliability and reliability.get("components"):
+            with st.expander("Reliability Score Breakdown", expanded=False):
+                st.markdown("**Component Scores (weighted):**")
+                components = reliability.get("components", {})
+                
+                comp_cols = st.columns(4)
+                
+                with comp_cols[0]:
+                    comp_score = components.get("database_health", 0)
+                    st.metric("Database Health", f"{comp_score}%")
+                
+                with comp_cols[1]:
+                    comp_score = components.get("query_success", 0)
+                    st.metric("Query Success", f"{comp_score}%")
+                
+                with comp_cols[2]:
+                    comp_score = components.get("retrieval_quality", 0)
+                    st.metric("Retrieval Quality", f"{comp_score}%")
+                
+                with comp_cols[3]:
+                    comp_score = components.get("performance", 0)
+                    st.metric("Performance", f"{comp_score}%")
+                
+                st.info("""
+                **Scoring Methodology:**
+                - **Database Health (25%)**: Connectivity and document count
+                - **Query Success (25%)**: Batch query success rate
+                - **Retrieval Quality (30%)**: Semantic relevance of results
+                - **Performance (20%)**: Query latency efficiency
+                
+                **Reliability Scale:**
+                - 85%+ : Excellent performance
+                - 70-84% : Good performance
+            - 50-69% : Fair performance
+            - <50% : Poor performance
+            """)
+        
+        # Summary dashboard
+        st.markdown("### Verification Summary")
+        summary_cols = st.columns(4)
+        
+        with summary_cols[0]:
+            st.metric("Health", results.get("overall_status", "unknown").title())
+        with summary_cols[1]:
+            st.metric("Indexed", f"{vdb.get('document_count', 0):,}")
+        with summary_cols[2]:
+            sq = results.get("sample_query", {})
+            st.metric("Query Time", f"{sq.get('latency_ms', 0):.0f}ms")
+        with summary_cols[3]:
+            st.metric("Reliability", f"{rel_score}%")
+    
+    except Exception as e:
+        st.error(f"Verification failed: {e}")
+        st.info("Make sure the RAG pipeline is properly initialized.")

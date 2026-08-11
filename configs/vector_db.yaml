@@ -1,0 +1,51 @@
+# Vector Database Configuration
+# Parameters for embedding, chunking, and retrieval
+
+embedding:
+  # Model selection: sentence-transformers models
+  model: "sentence-transformers/all-MiniLM-L6-v2"
+  dimension: 384
+  device: "cpu"  # or "cuda" for GPU
+  batch_size: 32
+  normalize_embeddings: true
+
+chunking:
+  # Text chunking strategy
+  chunk_size: 256  # tokens (approximate)
+  overlap: 50      # tokens overlap between chunks
+  method: "semantic"  # "fixed" or "semantic"
+  min_chunk_length: 50  # minimum characters per chunk
+
+retrieval:
+  # Similarity search parameters
+  similarity_metric: "cosine"  # "cosine", "euclidean", "l2"
+  top_k: 5  # number of most similar chunks to retrieve
+  confidence_threshold: 0.5  # minimum similarity score [0-1]
+  rerank: true  # re-rank results by relevance
+
+taxonomy:
+  # Concept classification parameters
+  min_confidence: 0.05  # minimum confidence score for concept assignment
+  max_concepts_per_chunk: 5  # limit assignments per chunk
+
+vector_store:
+  # Vector database backend
+  backend: "chroma"  # options: "chroma", "weaviate", "milvus"
+  persist_directory: "./vector_db/data"
+  collection_name: "co2m_corpus"
+  
+  # Chroma-specific settings
+  chroma:
+    distance_metric: "cosine"
+    
+  # Weaviate-specific settings (if using cloud)
+  weaviate:
+    url: "http://localhost:8080"
+    api_key: null
+
+indexing:
+  # Incremental update strategy
+  track_checksums: true  # detect duplicate PDFs
+  versioning: true  # track embedding model versions
+  auto_deduplicate: true  # skip re-indexing identical docs
+  batch_index_size: 100  # chunks per indexing batch
