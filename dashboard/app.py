@@ -28,8 +28,16 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 # RAG Pipeline imports
-from rag_pipeline.query_service import RAGQueryService
-from rag_pipeline.verification import RAGVerification
+# Keep these optional so the dashboard still loads even when a native dependency
+# (for example on Windows) prevents the embedding stack from being imported.
+try:
+    from rag_pipeline.query_service import RAGQueryService
+    from rag_pipeline.verification import RAGVerification
+    _RAG_IMPORT_ERROR = None
+except Exception as exc:  # pragma: no cover - exercised in runtime fallback
+    RAGQueryService = None
+    RAGVerification = None
+    _RAG_IMPORT_ERROR = exc
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -334,6 +342,13 @@ tab_rag, tab_overview, tab_science, tab_deepdive, tab_domain, tab_compare, tab_d
 # ============================================================
 with tab_rag:
     st.markdown("### Semantic Search")
+
+    if RAGQueryService is None:
+        st.warning("Semantic search is unavailable because the RAG dependencies could not be loaded.")
+        if _RAG_IMPORT_ERROR is not None:
+            st.code(str(_RAG_IMPORT_ERROR))
+        st.info("This can happen on Windows when a native dependency such as a DLL is missing. Install or repair the embedding stack and reload the app.")
+        st.stop()
 
     # Initialize service (cached)
     @st.cache_resource
