@@ -1,0 +1,17 @@
+# Vector Database and Embedding Dependencies
+# Add these to your main requirements.txt
+
+# Embeddings
+sentence-transformers>=2.2.0
+torch>=2.0.0  # Required by sentence-transformers
+
+# Vector Database
+chromadb>=0.3.21
+
+# Utilities
+pyyaml>=6.0
+pandas>=1.5.0
+numpy>=1.23.0
+psycopg[binary]>=3.2.0
+pypdf>=5.0.0
+cryptography>=3.1

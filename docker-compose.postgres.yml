@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: co2m-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: co2m
+      POSTGRES_USER: co2m
+      POSTGRES_PASSWORD: co2m
+    ports:
+      - "5432:5432"
+    volumes:
+      - co2m-postgres-data:/var/lib/postgresql/data
+
+volumes:
+  co2m-postgres-data:
