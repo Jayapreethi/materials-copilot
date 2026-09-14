@@ -7,6 +7,7 @@ import os
 from typing import Any, Iterable, Optional
 
 import psycopg
+from psycopg import sql
 from psycopg.rows import dict_row
 
 
@@ -58,18 +59,25 @@ CREATE INDEX IF NOT EXISTS chunks_embedding_idx
 class PostgresCorpusStore:
     """Postgres store with relational document/chunk columns and JSONB metadata."""
 
-    def __init__(self, dsn: Optional[str] = None, dimension: int = 384) -> None:
+    def __init__(self, dsn: Optional[str] = None, dimension: int = 384, schema: str = "public") -> None:
         self.dsn = dsn or os.getenv(
             "CO2M_POSTGRES_DSN",
             "postgresql://co2m:co2m@127.0.0.1:5432/co2m",
         )
         self.dimension = dimension
+        if not schema.replace("_", "").isalnum() or not schema:
+            raise ValueError("schema must contain only letters, digits, and underscores")
+        self.schema = schema
         if dimension != 384:
             raise ValueError("The current schema is defined for 384-dimensional embeddings")
         self.initialize()
 
     def connect(self):
-        return psycopg.connect(self.dsn, row_factory=dict_row)
+        return psycopg.connect(
+            self.dsn,
+            row_factory=dict_row,
+            options=f"-c search_path={self.schema},public",
+        )
 
     def initialize(self) -> None:
         with self.connect() as connection:

@@ -63,6 +63,7 @@ def main() -> None:
     parser.add_argument("question")
     parser.add_argument("--top-k", type=int, default=6)
     parser.add_argument("--dsn", default=None)
+    parser.add_argument("--schema", default="public", help="PostgreSQL schema containing the corpus")
     parser.add_argument("--ollama-url", default="http://127.0.0.1:11434")
     parser.add_argument("--model", default="qwen3:8b")
     parser.add_argument("--timeout", type=int, default=120)
@@ -71,7 +72,7 @@ def main() -> None:
     args = parser.parse_args()
 
     embedder = EmbeddingGenerator()
-    store = PostgresCorpusStore(dsn=args.dsn)
+    store = PostgresCorpusStore(dsn=args.dsn, schema=args.schema)
 
     query_embedding = embedder.embed([args.question])[0].tolist()
     chunks = store.search(query_embedding, top_k=args.top_k, unique_only=not args.all_documents)
