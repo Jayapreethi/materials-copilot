@@ -80,25 +80,37 @@ def structural_checks(store: PostgresCorpusStore, chunk_words: int) -> dict[str,
     }
 
 
-def self_retrieval_control(store: PostgresCorpusStore, sample_size: int) -> dict[str, Any]:
+def self_retrieval_control(store: PostgresCorpusStore, sample_size: int, offset: int = 0) -> dict[str, Any]:
     with store.connect() as connection:
         samples = connection.execute(
             """
             SELECT chunk_id, embedding FROM chunks
-            WHERE embedding IS NOT NULL ORDER BY chunk_id LIMIT %s
+            WHERE embedding IS NOT NULL ORDER BY chunk_id LIMIT %s OFFSET %s
             """,
-            (sample_size,),
+            (sample_size, offset),
         ).fetchall()
-    hits = 0
-    for sample in samples:
-        embedding = [float(value) for value in str(sample["embedding"])[1:-1].split(",")]
-        result = store.search(embedding, top_k=1, unique_only=False)
-        hits += bool(result and result[0]["chunk_id"] == sample["chunk_id"])
+        hits = 0
+        missed_chunk_ids = []
+        for sample in samples:
+            result = connection.execute(
+                """
+                SELECT chunk_id FROM chunks WHERE embedding IS NOT NULL
+                ORDER BY embedding <=> %s::vector LIMIT 1
+                """,
+                (str(sample["embedding"]),),
+            ).fetchone()
+            is_hit = result and result["chunk_id"] == sample["chunk_id"]
+            hits += bool(is_hit)
+            if not is_hit and len(missed_chunk_ids) < 20:
+                missed_chunk_ids.append(sample["chunk_id"])
     tested = len(samples)
     score = hits / tested if tested else 0.0
     return {
+        "offset": offset,
         "tested": tested,
         "top_1_hits": hits,
+        "top_1_misses": tested - hits,
+        "example_missed_chunk_ids": missed_chunk_ids,
         "precision_at_1": score,
         "recall_at_1": score,
         "mrr": score,
@@ -146,19 +158,34 @@ def main() -> None:
     parser.add_argument("--qrels", type=Path, help="JSONL human relevance judgments")
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--self-retrieval-samples", type=int, default=25)
+    parser.add_argument("--self-retrieval-all", action="store_true", help="Test every embedded chunk")
+    parser.add_argument("--batch-size", type=int, default=100000, help="Chunks per full-corpus metric batch")
     parser.add_argument("--chunk-words", type=int, default=180)
     parser.add_argument("--dsn", default=None)
     parser.add_argument("--schema", default="public", help="PostgreSQL schema containing the corpus")
     parser.add_argument("--output", type=Path, help="Optional JSON report path")
     args = parser.parse_args()
-    if args.top_k < 1 or args.self_retrieval_samples < 1:
-        parser.error("--top-k and --self-retrieval-samples must be positive")
+    if args.top_k < 1 or args.self_retrieval_samples < 1 or args.batch_size < 1:
+        parser.error("--top-k, --self-retrieval-samples, and --batch-size must be positive")
 
     store = PostgresCorpusStore(dsn=args.dsn, schema=args.schema)
-    report: dict[str, Any] = {
-        "structural_checks": structural_checks(store, args.chunk_words),
-        "self_retrieval_control": self_retrieval_control(store, args.self_retrieval_samples),
-    }
+    report: dict[str, Any] = {"structural_checks": structural_checks(store, args.chunk_words)}
+    if args.self_retrieval_all:
+        total = report["structural_checks"]["chunks"]
+        batches = [
+            self_retrieval_control(store, min(args.batch_size, total - offset), offset)
+            for offset in range(0, total, args.batch_size)
+        ]
+        tested = sum(batch["tested"] for batch in batches)
+        hits = sum(batch["top_1_hits"] for batch in batches)
+        score = hits / tested if tested else 0.0
+        report["self_retrieval_batches"] = batches
+        report["self_retrieval_aggregate"] = {
+            "tested": tested, "top_1_hits": hits, "top_1_misses": tested - hits,
+            "precision_at_1": score, "recall_at_1": score, "mrr": score, "ndcg_at_1": score,
+        }
+    else:
+        report["self_retrieval_control"] = self_retrieval_control(store, args.self_retrieval_samples)
     if args.qrels:
         report["labeled_retrieval_metrics"] = evaluate_qrels(store, load_qrels(args.qrels), args.top_k)
     print(json.dumps(report, indent=2, default=str))
