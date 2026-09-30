@@ -6,7 +6,7 @@ Materials Copilot is a modular scientific literature intelligence system compose
 
 One of the technical components of Materials Copilot is the **CO2M Literature Intelligence System** — an interactive knowledge-extraction and exploration platform for the CO₂ capture and mineralization literature corpus.
 
-<img width="900" height="369" alt="image" src="https://github.com/user-attachments/assets/31ac9fe8-37dd-4532-99f0-099bcd7d2323" />
+<img width="999" height="569" alt="image" src="https://github.com/user-attachments/assets/31ac9fe8-37dd-4532-99f0-099bcd7d2323" />
 
 
 It runs a 7-stage offline pipeline (taxonomy loading → metadata enrichment → PDF discovery → text extraction & chunking → concept classification → extractive summaries → visualization table generation) and materializes all outputs as Parquet data cubes. The dashboard reads only from these artifacts, making it safe for air-gapped and restricted-network compute environments.
