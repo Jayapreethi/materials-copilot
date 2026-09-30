@@ -78,32 +78,50 @@ METADATA_SCHEMA = {
 }
 
 SYSTEM_PROMPT = """You extract metadata from scientific literature about CO2 capture,
-conversion, storage, and mineralization. Return only data supported by the supplied
+conversion, storage, hydrogen, sustainable fuels and chemicals, batteries and energy
+storage, and industrial decarbonization. Return only data supported by the supplied
 PDF text. Do not guess missing bibliographic facts. Use null or an empty array when
 evidence is absent. Keep names and measurement strings faithful to the source.
 Classify scale_stage as exactly one of laboratory, bench, pilot, demonstration,
 or commercial. Assess TRL using these bands: laboratory 2-3, bench 3-4, pilot 4-5,
 demonstration 5-6, and commercial 6-7. Base classifications on the technology
-actually studied, not scale words in citations or search metadata.
+actually studied, not scale words in citations or search metadata. Assess every
+domain-relevant document: use reported when the source explicitly states a TRL,
+inferred when the documented operating scale supports a band, and not_assessed only
+when the supplied text is insufficient. Never assign a higher stage than the source
+directly supports.
 
 Set trl_source to reported only when the supplied text explicitly reports a TRL and
 put that integer in reported_trl. Otherwise use inferred and populate inferred_trl_min,
 inferred_trl_max, max_directly_demonstrated_trl, and concise snake_case
 assessment_basis codes such as pilot_scale_operation, relevant_feed, or
 integrated_subsystem. Use not_assessed and null numeric fields for unrelated papers
-or insufficient evidence. Never infer beyond what was directly demonstrated.
+or insufficient evidence, and explain the reason in assessment_basis when possible.
+Do not mark a record as not_assessed merely because the source does not use the word
+TRL if its documented scale and operating evidence support an inference.
 
-Create evidence entries with sequential IDs such as EVID_001. Each entry must contain
-the source page and a short verbatim quote. evidence_refs must contain only IDs present
-in evidence and relevant to the TRL assessment. Set scale_stage_evidence to one of
-those IDs, or null when scale is not assessed. Confidence is an overall score from 0
-to 1 for the extracted record."""
+Create evidence entries with sequential IDs such as EVID_001. Every assessed scale,
+TRL, transition, quantitative fact, challenge, outcome, or deployment claim must have
+at least one supporting evidence entry. Each entry must contain the source page and a
+short verbatim quote. evidence_refs must contain only IDs present in evidence and
+relevant to the TRL assessment. Set scale_stage_evidence to one of those IDs, or null
+when scale is not assessed. Confidence is an overall score from 0 to 1 for the
+extracted record."""
 
 
 def representative_text(pages: list[tuple[int, str]], max_chars: int) -> tuple[str, list[int]]:
     """Select front matter plus relevant pages while preserving page provenance."""
     selected: list[tuple[int, str]] = []
-    keywords = ("co2", "carbon dioxide", "capture", "adsorp", "absorp", "mineral", "sorbent")
+    keywords = (
+        "co2", "carbon dioxide", "capture", "adsorp", "absorp", "mineral", "sorbent",
+        "hydrogen", "electrolysis", "electrolyzer", "methane pyrolysis", "reforming",
+        "syngas", "biomass", "biofuel", "sustainable aviation", "e-fuel", "methanol",
+        "ammonia", "fischer-tropsch", "battery", "batteries", "electrode",
+        "lithium-ion", "energy storage", "process heat", "waste heat", "heat recovery",
+        "process intensification", "pilot", "demonstration", "commercial", "scale-up",
+        "scaleup", "throughput", "capacity", "operating duration", "technology readiness",
+        "trl", "facility", "plant", "deployment", "integrated system",
+    )
     for page_number, text in pages:
         if page_number <= 3 or any(keyword in text.lower() for keyword in keywords):
             selected.append((page_number, text))
@@ -267,7 +285,21 @@ def normalize_trl_assessment(metadata: dict[str, Any]) -> None:
     if metadata.get("scale_stage_evidence") not in evidence_ids:
         metadata["scale_stage_evidence"] = None
 
-    if metadata.get("co2_processes"):
+    # Preserve assessments for all supported energy domains, not only records
+    # that use the legacy co2_processes field.
+    has_domain_assessment = any(
+        metadata.get(field)
+        for field in (
+            "co2_processes",
+            "materials",
+            "measurement_methods",
+            "reported_properties",
+            "keywords",
+            "scale_stage",
+            "evidence_refs",
+        )
+    )
+    if has_domain_assessment:
         if metadata.get("trl_source") == "inferred":
             demonstrated = metadata.get("max_directly_demonstrated_trl")
             if demonstrated is None:

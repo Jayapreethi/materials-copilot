@@ -150,6 +150,11 @@ def main() -> None:
     )
     parser.add_argument("--count", type=int, required=True, help="Number of sorted PDFs to process, e.g. 5, 10, 100, or 10000.")
     parser.add_argument("--pdf-dir", type=Path, default=ROOT / "all_pdfs")
+    parser.add_argument(
+        "--filename-list",
+        type=Path,
+        help="Optional newline-delimited PDF filenames to process from --pdf-dir.",
+    )
     parser.add_argument("--output-dir", type=Path, default=ROOT / "co2m" / "metadata")
     parser.add_argument("--name", help="Artifact name stem. Defaults to qwen80b_<count>_pdfs_metadata.")
     parser.add_argument("--raw-input", type=Path, help="Existing JSONL metadata to format instead of the default raw-output path.")
@@ -168,7 +173,16 @@ def main() -> None:
     if args.count < 1:
         parser.error("--count must be at least 1")
 
-    selected_pdfs = sorted(args.pdf_dir.rglob("*.pdf"))[:args.count]
+    all_pdfs = sorted(args.pdf_dir.rglob("*.pdf"))
+    if args.filename_list:
+        requested = {
+            line.strip().lower()
+            for line in args.filename_list.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        }
+        selected_pdfs = [pdf for pdf in all_pdfs if pdf.name.lower() in requested]
+    else:
+        selected_pdfs = all_pdfs[:args.count]
     if len(selected_pdfs) < args.count:
         parser.error(f"Only {len(selected_pdfs)} PDFs found in {args.pdf_dir}")
 
