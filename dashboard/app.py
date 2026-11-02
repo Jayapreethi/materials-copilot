@@ -1,4 +1,4 @@
-"""
+﻿"""
 dashboard/app.py
 CO2M Literature Intelligence Dashboard
 Run: streamlit run co2m_lit_dashboard/dashboard/app.py
@@ -32,12 +32,17 @@ if str(PROJECT_ROOT) not in sys.path:
 # (for example on Windows) prevents the embedding stack from being imported.
 try:
     from rag_pipeline.query_service import RAGQueryService
-    from rag_pipeline.verification import RAGVerification
     _RAG_IMPORT_ERROR = None
 except Exception as exc:  # pragma: no cover - exercised in runtime fallback
     RAGQueryService = None
-    RAGVerification = None
     _RAG_IMPORT_ERROR = exc
+
+try:
+    from rag_pipeline.verification import RAGVerification
+    _VERIFICATION_IMPORT_ERROR = None
+except Exception as exc:  # pragma: no cover - optional module
+    RAGVerification = None
+    _VERIFICATION_IMPORT_ERROR = exc
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -48,7 +53,7 @@ ARTIFACTS_DIR = PROJECT_ROOT / "co2m" / "artifacts"
 # Page config  (must be first Streamlit call)
 # ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="CO2M Literature Intelligence",
+    page_title="Process Engineering AI Copilot: Lab Discovery to Pilot Scale Development",
     page_icon="",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -210,13 +215,10 @@ def load_all():
 
 
 if not ARTIFACTS_DIR.exists():
-    st.error(
-        f"**Artifacts not found:** `{ARTIFACTS_DIR}`\n\n"
-        "Run the build script first:\n```\n"
-        "python co2m_lit_dashboard/src/build_corpus.py "
-        "--pdf-dir co2m/pdfs --metadata-dir co2m/metadata --out co2m/artifacts\n```"
+    st.warning(
+        f"**Dashboard artifacts not found:** `{ARTIFACTS_DIR}`. "
+        "Artifact-based tabs are disabled, but Semantic Search uses the live Postgres vector database."
     )
-    st.stop()
 
 data, manifest = load_all()
 documents_df     = data["documents"]
@@ -226,6 +228,7 @@ summaries_df     = data["summaries"]
 concept_counts_df= data["concept_counts"]
 top_docs_df      = data["top_documents_by_concept"]
 keywords_df      = data["keywords_by_concept"]
+has_artifacts = not concept_counts_df.empty or not summaries_df.empty
 
 has_year = (
     not documents_df.empty
@@ -238,13 +241,27 @@ has_year = (
 # ---------------------------------------------------------------------------
 hcol, dcol = st.columns([7, 1])
 with hcol:
-    st.title("CO2M Literature Intelligence")
+    st.title("Process Engineering AI Copilot: Lab Discovery to Pilot Scale Development")
 with dcol:
     if manifest:
         ts = manifest.get("build_timestamp", "")
         if ts:
             st.caption(f"Built {ts[:10]}")
 st.markdown("---")
+
+# ---------------------------------------------------------------------------
+# Live Postgres corpus stats (used when artifacts are unavailable)
+# ---------------------------------------------------------------------------
+@st.cache_data(ttl=300)
+def live_corpus_stats() -> dict:
+    try:
+        from vector_db.postgres_corpus_store import PostgresCorpusStore
+        store = PostgresCorpusStore()
+        return store.stats()
+    except Exception:
+        return {"documents": 0, "chunks": 0, "embedded_chunks": 0, "unique_documents": 0}
+
+live_stats = live_corpus_stats()
 
 # ---------------------------------------------------------------------------
 # Sidebar
@@ -258,27 +275,105 @@ all_concepts: list[str] = (
     if not summaries_df.empty
     else []
 )
+
+# Fallback: derive concept/topic options from live Postgres metadata when artifacts are absent.
 if not all_concepts:
-    st.warning("No concept data. Run the build script first.")
-    st.stop()
+    try:
+        from vector_db.postgres_corpus_store import PostgresCorpusStore
+        _concept_store = PostgresCorpusStore()
+        with _concept_store.connect() as _conn:
+            _rows = _conn.execute(
+                "SELECT DISTINCT kw FROM documents, LATERAL ("
+                "SELECT jsonb_array_elements_text(metadata->'keywords') AS kw WHERE jsonb_typeof(metadata->'keywords') = 'array'"
+                " UNION ALL SELECT metadata->>'keywords' AS kw WHERE jsonb_typeof(metadata->'keywords') = 'string'"
+                ") kws WHERE kw IS NOT NULL AND kw != ''"
+            ).fetchall()
+        live_concepts = sorted({row["kw"] for row in _rows if row.get("kw")})
+        standard_topics = [
+            # Carbon management
+            "CO2 Capture", "CO2 Conversion", "CO2 Storage", "CO2 Utilization",
+            "Carbon Mineralization", "Carbonation", "Direct Air Capture", "Ocean CDR",
+            "Point Source Capture", "Post-Combustion Capture", "Pre-Combustion Capture",
+            "Oxy-Fuel Combustion", "Chemical Looping", "Calcium Looping", "Carbonate Looping",
+            "Amine Scrubbing", "Solid Sorbents", "Membrane Separation", "Cryogenic Separation",
+            "Pressure Swing Adsorption", "Temperature Swing Adsorption", "Vacuum Swing Adsorption",
+            "Electrochemical CO2 Reduction", "Photocatalytic CO2 Reduction", "Biocatalytic CO2 Fixation",
+            "CO2 to Fuels", "CO2 to Chemicals", "CO2 to Materials", "Methanation",
+            "Fischer-Tropsch Synthesis", "Methanol Synthesis", "Formic Acid Production",
+            # Hydrogen
+            "Hydrogen Production", "Hydrogen Storage", "Hydrogen Transport", "Hydrogen Utilization",
+            "Water Electrolysis", "Alkaline Electrolysis", "PEM Electrolysis", "Solid Oxide Electrolysis",
+            "Photoelectrochemical Water Splitting", "Photocatalytic Water Splitting",
+            "Thermochemical Hydrogen Production", "Methane Pyrolysis", "Steam Methane Reforming",
+            "Autothermal Reforming", "Biomass Gasification", "Coal Gasification",
+            "Hydrogen Compression", "Hydrogen Liquefaction", "Liquid Organic Hydrogen Carriers",
+            "Ammonia as Hydrogen Carrier", "Metal Hydrides", "Compressed Hydrogen Storage",
+            # Energy storage
+            "Lithium-Ion Batteries", "Solid-State Batteries", "Flow Batteries", "Sodium-Ion Batteries",
+            "Battery Manufacturing", "Battery Recycling", "Thermal Energy Storage", "Sensible Heat Storage",
+            "Latent Heat Storage", "Thermochemical Storage", "Compressed Air Energy Storage",
+            "Pumped Hydro Storage", "Flywheel Energy Storage", "Supercapacitors", "Hydrogen Storage",
+            # Process engineering
+            "Process Intensification", "Scale-Up", "Pilot Plant", "Bench Scale", "Laboratory Scale",
+            "Continuous Flow Reactors", "Batch Reactors", "Packed Bed Reactors", "Fluidized Bed Reactors",
+            "Bubble Column Reactors", "Slurry Reactors", "Fixed Bed Reactors", "Membrane Reactors",
+            "Reactive Distillation", "Heat Exchangers", "Separations", "Distillation", "Extraction",
+            "Crystallization", "Precipitation", "Filtration", "Centrifugation", "Drying",
+            "Process Control", "Process Optimization", "Process Simulation", "Process Design",
+            "Techno-Economic Analysis", "Life Cycle Assessment", "Pinch Analysis", "Exergy Analysis",
+            "Energy Integration", "Waste Heat Recovery", "Industrial Decarbonization", "Electrification",
+            # Materials
+            "Materials Synthesis", "Materials Characterization", "Catalysts", "Sorbents", "Membranes",
+            "Metal-Organic Frameworks", "Zeolites", "Porous Materials", "Nanomaterials", "Polymers",
+            "Ionic Liquids", "Deep Eutectic Solvents", "Carbon Materials", "Metal Oxides",
+            "Perovskites", "Single-Atom Catalysts", "Heterogeneous Catalysis", "Homogeneous Catalysis",
+            "Electrocatalysts", "Photocatalysts", "Biocatalysts", "Enzyme Catalysis",
+            # Analysis methods
+            "Techno-Economic Analysis", "Life Cycle Assessment", "Energy Efficiency",
+            "Thermodynamics", "Kinetics", "Mass Transfer", "Heat Transfer", "Fluid Dynamics",
+            "Reaction Engineering", "Transport Phenomena", "Process Modeling", "CFD Simulation",
+            "Molecular Simulation", "Density Functional Theory", "Machine Learning for Materials",
+            "High-Throughput Screening", "Experimental Design", "Statistical Analysis",
+        ]
+        all_concepts = sorted(set(live_concepts + standard_topics))[:500]
+    except Exception:
+        all_concepts = []
 
-selected_concept: str = st.sidebar.selectbox("Scientific Concept", all_concepts)
+if not all_concepts:
+    st.sidebar.caption("No concept data available; semantic search remains available.")
+    selected_concept = "No concept data"
+    year_filter = []
+    keyword_search = ""
+else:
+    selected_concept: str = st.sidebar.selectbox("Scientific Concept", all_concepts)
 
-year_filter: list[int] = []
-if has_year:
-    years = sorted(documents_df["year"].dropna().astype(int).unique().tolist())
+    year_filter: list[int] = []
+    years: list[int] = []
+    if has_year:
+        years = sorted(documents_df["year"].dropna().astype(int).unique().tolist())
+    elif all_concepts:
+        try:
+            from vector_db.postgres_corpus_store import PostgresCorpusStore
+            _year_store = PostgresCorpusStore()
+            with _year_store.connect() as _conn:
+                _years = _conn.execute(
+                    "SELECT DISTINCT publication_year FROM documents WHERE publication_year IS NOT NULL ORDER BY publication_year"
+                ).fetchall()
+            years = [int(row["publication_year"]) for row in _years if row.get("publication_year")]
+        except Exception:
+            years = []
     if len(years) > 1:
         year_filter = st.sidebar.multiselect("Year", options=years, default=[])
 
-keyword_search: str = st.sidebar.text_input("Snippet keyword", placeholder="filter snippets …")
+    keyword_search: str = st.sidebar.text_input("Snippet keyword", placeholder="filter snippets …")
 
 st.sidebar.markdown("---")
 if manifest:
     st.sidebar.markdown("**Corpus**")
     st.sidebar.markdown(
-        f"PDFs: **{manifest.get('pdf_count','—')}**  \n"
-        f"Chunks: **{manifest.get('chunk_count','—')}**  \n"
-        f"Assignments: **{manifest.get('concept_assignment_count','—')}**"
+        f"PDFs: **{live_stats['documents']:,}**  \n"
+        f"Chunks: **{live_stats['chunks']:,}**  \n"
+        f"Unique Docs: **{live_stats['unique_documents']:,}**"
     )
 
 # ---------------------------------------------------------------------------
@@ -286,7 +381,7 @@ if manifest:
 # ---------------------------------------------------------------------------
 concept_rows = (
     concepts_df[concepts_df["concept_name"] == selected_concept].copy()
-    if not concepts_df.empty else pd.DataFrame()
+    if not concepts_df.empty and selected_concept != "No concept data" else pd.DataFrame()
 )
 concept_chunk_ids: set[int] = set(concept_rows["chunk_id"].unique()) if not concept_rows.empty else set()
 concept_doc_ids: set[int]   = set(concept_rows["doc_id"].unique())   if not concept_rows.empty else set()
@@ -300,27 +395,74 @@ if year_filter and has_year and not documents_df.empty:
 # ---------------------------------------------------------------------------
 # Metrics
 # ---------------------------------------------------------------------------
-total_pdfs = len(documents_df) if not documents_df.empty else 0
+total_pdfs = live_stats["documents"] if live_stats["documents"] else (len(documents_df) if not documents_df.empty else 0)
+total_chunks = live_stats["chunks"] if live_stats["chunks"] else (len(chunks_df) if not chunks_df.empty else 0)
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("Total PDFs", f"{total_pdfs:,}")
-m2.metric("Matching PDFs", f"{len(concept_doc_ids):,}")
-m3.metric("Matching Chunks", f"{len(concept_chunk_ids):,}")
+m1.metric("Total Documents", f"{total_pdfs:,}")
+m2.metric("Unique Documents", f"{live_stats['unique_documents']:,}")
+m3.metric("Total Chunks", f"{total_chunks:,}")
 if has_year and concept_doc_ids and not documents_df.empty:
     yr_s = documents_df.loc[documents_df["doc_id"].isin(concept_doc_ids), "year"].dropna()
     m4.metric("Peak Year", str(int(yr_s.mode().iloc[0])) if not yr_s.empty else "—")
 else:
-    m4.metric("Total Chunks", f"{len(chunks_df):,}" if not chunks_df.empty else "0")
+    m4.metric("Embedded Chunks", f"{live_stats['embedded_chunks']:,}" if live_stats['embedded_chunks'] else "0")
 
 # ---------------------------------------------------------------------------
 # Concept summary
 # ---------------------------------------------------------------------------
-st.markdown(f"#### {selected_concept}")
-summary_text = "No summary available for this concept."
-if not summaries_df.empty:
-    _r = summaries_df[summaries_df["concept_name"] == selected_concept]
-    if not _r.empty:
-        summary_text = _r.iloc[0]["summary_text"]
-st.markdown(f'<div class="co2m-summary">{summary_text}</div>', unsafe_allow_html=True)
+if selected_concept != "No concept data":
+    st.markdown(f"#### {selected_concept}")
+    summary_text = "No summary available for this concept."
+    if not summaries_df.empty:
+        _r = summaries_df[summaries_df["concept_name"] == selected_concept]
+        if not _r.empty:
+            summary_text = _r.iloc[0]["summary_text"]
+    st.markdown(f'<div class="co2m-summary">{summary_text}</div>', unsafe_allow_html=True)
+
+# ---------------------------------------------------------------------------
+# Live corpus categorization
+# ---------------------------------------------------------------------------
+@st.cache_data(ttl=300)
+def live_corpus_categories() -> dict[str, list[str]]:
+    try:
+        from vector_db.postgres_corpus_store import PostgresCorpusStore
+        store = PostgresCorpusStore()
+        with store.connect() as conn:
+            rows = conn.execute("""
+                SELECT DISTINCT jsonb_array_elements_text(metadata->'material_classes') AS category
+                FROM documents WHERE metadata ? 'material_classes'
+                UNION
+                SELECT DISTINCT jsonb_array_elements_text(metadata->'co2_processes') AS category
+                FROM documents WHERE metadata ? 'co2_processes'
+                UNION
+                SELECT DISTINCT jsonb_array_elements_text(metadata->'measurement_methods') AS category
+                FROM documents WHERE metadata ? 'measurement_methods'
+                UNION
+                SELECT DISTINCT jsonb_array_elements_text(metadata->'reported_properties') AS category
+                FROM documents WHERE metadata ? 'reported_properties'
+                ORDER BY category
+            """).fetchall()
+        live = [r["category"] for r in rows if r.get("category")]
+        standard = [
+            "CO2 Capture", "CO2 Conversion", "CO2 Storage", "Hydrogen Production",
+            "Hydrogen Storage", "Electrolysis", "Catalysis", "Membrane Separation",
+            "Adsorption", "Absorption", "Mineralization", "Process Intensification",
+            "Scale-Up", "Pilot Plant", "Bench Scale", "Laboratory Scale",
+            "Techno-Economic Analysis", "Life Cycle Assessment", "Energy Efficiency",
+            "Materials Synthesis", "Characterization", "Thermodynamics", "Kinetics",
+            "Sorbents", "Catalysts", "Membranes", "MOFs", "Zeolites", "Amines",
+        ]
+        return {"Material Classes": sorted(set(live + standard))}
+    except Exception:
+        return {"Material Classes": []}
+
+live_categories = live_corpus_categories()
+if live_categories:
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### Corpus Categorization")
+    category_group = st.sidebar.selectbox("Category Group", options=list(live_categories.keys()))
+    if category_group and live_categories.get(category_group):
+        selected_category = st.sidebar.selectbox("Category", options=live_categories[category_group])
 
 # ===========================================================================
 # TABBED NAVIGATION
@@ -411,11 +553,20 @@ with tab_rag:
         if llm_status.get("available"):
             provider = llm_status.get('provider', 'unknown').title()
             if llm_status.get('auto_detected'):
-                st.caption(f"✓ Auto-detected: {provider}")
+                st.caption(f"âœ“ Auto-detected: {provider}")
             else:
-                st.caption(f"✓ {provider}")
+                st.caption(f"âœ“ {provider}")
         else:
-            st.caption("⚠️ AI not available. Install Ollama or set API keys for free/paid LLM access")
+            st.caption("âš ï¸ AI not available. Install Ollama or set API keys for free/paid LLM access")
+    
+    trl_filter = st.selectbox(
+        "Scale-derived TRL proxy:",
+        options=["None", "TRL_2_3_PROXY", "TRL_4_5_PROXY", "TRL_6_7_PROXY", "INSUFFICIENT_EVIDENCE", "REVIEW_EXCLUDED"],
+        key="trl_proxy_filter_rag",
+        help="Filter retrieved chunks by the two-pass scale-derived TRL proxy metadata",
+    )
+    if trl_filter == "None":
+        trl_filter = None
     
     if concept_filter == "None":
         concept_filter = None
@@ -449,6 +600,7 @@ with tab_rag:
                         concept_filter=concept_filter,
                         temperature=0.7,
                         max_tokens=500,
+                        trl_proxy=trl_filter,
                     )
                 else:
                     results = query_service.query(
@@ -456,6 +608,7 @@ with tab_rag:
                         top_k=top_k,
                         concept_filter=concept_filter,
                         include_context=include_context,
+                        trl_proxy=trl_filter,
                     )
             # Store results in session state
             st.session_state.search_results = results
@@ -475,11 +628,44 @@ with tab_rag:
             st.markdown("---")
             st.markdown("### 🤖 AI-Generated Answer")
             
-            # Display the response as formatted markdown
-            try:
-                st.markdown(results['llm_response'])
-            except Exception as e:
-                st.text(results['llm_response'])
+            structured = results.get("structured_answer")
+            if isinstance(structured, dict) and structured.get("status"):
+                status_label = structured["status"].replace("_", " ").title()
+                st.caption(f"Status: {status_label}")
+                st.markdown(structured.get("direct_answer") or "")
+                findings = structured.get("findings") or []
+                if findings:
+                    st.markdown("#### Findings")
+                    for idx, finding in enumerate(findings, 1):
+                        st.markdown(f"**{idx}. {finding.get('statement', '')}**")
+                        if finding.get("material_or_technology"):
+                            st.caption(f"Material/Technology: {finding['material_or_technology']}")
+                        if finding.get("quantitative_result"):
+                            st.caption(f"Quantitative result: {finding['quantitative_result']}")
+                        if finding.get("reported_conditions"):
+                            st.caption(f"Conditions: {finding['reported_conditions']}")
+                        if finding.get("limitation"):
+                            st.caption(f"Limitation: {finding['limitation']}")
+                        evidence = finding.get("evidence") or []
+                        if evidence:
+                            with st.expander(f"Evidence for finding {idx}", expanded=False):
+                                for item in evidence:
+                                    st.caption(f"[{item.get('source_id')}] {item.get('exact_quote', '')}")
+                if structured.get("synthesis"):
+                    st.markdown("#### Synthesis")
+                    st.markdown(structured["synthesis"])
+                gaps = structured.get("evidence_gaps") or []
+                if gaps:
+                    with st.expander("Evidence gaps", expanded=False):
+                        for gap in gaps:
+                            st.caption(f"- {gap}")
+                if structured.get("expanded_search_required"):
+                    st.info("Additional retrieval is recommended for a broader answer.")
+            else:
+                try:
+                    st.markdown(results['llm_response'])
+                except Exception:
+                    st.text(results['llm_response'])
             
             # Show LLM metadata in a collapsible section
             with st.expander("Response Details", expanded=False):
@@ -498,9 +684,19 @@ with tab_rag:
             if results.get("llm_sources"):
                 with st.expander("Sources Used in Answer", expanded=False):
                     for i, source in enumerate(results["llm_sources"][:5], 1):
-                        file = source.get('file', 'Unknown')
-                        page = source.get('page', 'N/A')
-                        sim = source.get('similarity', 0)
+                        file = (
+                            source.get("file")
+                            or source.get("filename")
+                            or source.get("document_title")
+                            or "Unknown"
+                        )
+                        page = (
+                            source.get("page")
+                            or source.get("page_number")
+                            or source.get("page_start")
+                            or "N/A"
+                        )
+                        sim = source.get("similarity", 0)
                         st.caption(f"{i}. {file} (Page {page}) — {sim:.1%} match")
             
             st.markdown("---")
@@ -508,13 +704,13 @@ with tab_rag:
         # Display results summary
         col_r1, col_r2, col_r3 = st.columns(3)
         with col_r1:
-            st.metric("📄 Documents Found", results.get('num_results', 0))
+            st.metric("ðŸ“„ Documents Found", results.get('num_results', 0))
         with col_r2:
             summary = results.get("context_summary", {})
-            st.metric("📊 Unique Sources", summary.get('unique_documents', 0))
+            st.metric("ðŸ“Š Unique Sources", summary.get('unique_documents', 0))
         with col_r3:
             avg_sim = summary.get('avg_similarity', 0)
-            st.metric("📈 Match Score", f"{avg_sim:.1%}")
+            st.metric("ðŸ“ˆ Match Score", f"{avg_sim:.1%}")
 
         # Display summary if context was generated
         if "context_summary" in results and results.get("context_summary"):
@@ -532,7 +728,7 @@ with tab_rag:
 
                 if "co2_uptake_stats" in summary and summary["co2_uptake_stats"]:
                     co2_stats = summary["co2_uptake_stats"]
-                    st.markdown("**CO₂ Uptake (mmol/g)**")
+                    st.markdown("**COâ‚‚ Uptake (mmol/g)**")
                     co2col1, co2col2, co2col3 = st.columns(3)
                     with co2col1:
                         st.metric("Avg", f"{co2_stats.get('avg', 0):.2f}")
@@ -606,8 +802,10 @@ with tab_rag:
                         )
                         if result.get("material_name"):
                             st.caption(f"Material: {result['material_name']}")
+                        if result.get("trl_proxy"):
+                            st.caption(f"Scale-derived TRL proxy: {result['trl_proxy']}")
                         if result.get("co2_uptake_mmol_g"):
-                            st.caption(f"CO₂ Uptake: {result['co2_uptake_mmol_g']} mmol/g")
+                            st.caption(f"COâ‚‚ Uptake: {result['co2_uptake_mmol_g']} mmol/g")
                     st.divider()
 
 
@@ -702,7 +900,7 @@ with tab_science:
         "Scroll through each panel to understand the full research landscape."
     )
 
-    # ── A. Summary cards: doc count + chunk count per concept ────────────────
+    # â”€â”€ A. Summary cards: doc count + chunk count per concept â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if not summaries_df.empty and not concept_counts_df.empty:
         st.markdown("##### Concept Summaries")
         merged_summary = summaries_df.merge(
@@ -720,7 +918,7 @@ with tab_science:
                 f'border-radius:7px;padding:.75rem 1rem;margin-bottom:.5rem">'
                 f'<div style="display:flex;justify-content:space-between;align-items:baseline">'
                 f'<span style="font-weight:600;font-size:.95rem;color:{_ACCENT if is_sel else _TEXT}">{sr["concept_name"]}</span>'
-                f'<span style="font-size:.75rem;color:{_MUTED}">{doc_c} docs &nbsp;·&nbsp; {chk_c:,} chunks</span>'
+                f'<span style="font-size:.75rem;color:{_MUTED}">{doc_c} docs &nbsp;Â·&nbsp; {chk_c:,} chunks</span>'
                 f'</div>'
                 f'<div style="font-size:.85rem;color:#374151;line-height:1.6;margin-top:.35rem">{sr["summary_text"]}</div>'
                 f'</div>',
@@ -729,7 +927,7 @@ with tab_science:
 
     st.markdown("---")
 
-    # ── B. Side-by-side concept size comparison (treemap) ────────────────────
+    # â”€â”€ B. Side-by-side concept size comparison (treemap) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if not concept_counts_df.empty:
         st.markdown("##### Research Volume Treemap")
         st.caption("Area is proportional to total chunks assigned to each concept.")
@@ -758,11 +956,11 @@ with tab_science:
         )
         st.plotly_chart(fig_tm, use_container_width=True)
 
-    # ── C. All-concept keyword heatmap ───────────────────────────────────────
+    # â”€â”€ C. All-concept keyword heatmap â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if not keywords_df.empty:
         st.markdown("##### Keyword Presence Across All Concepts")
         st.caption(
-            "Top 15 keywords (by total TF-IDF weight across corpus) × all concepts. "
+            "Top 15 keywords (by total TF-IDF weight across corpus) Ã— all concepts. "
             "Brighter = stronger association."
         )
         top15_kws = (
@@ -796,7 +994,7 @@ with tab_science:
         fig_kh.update_traces(textfont=dict(size=8))
         st.plotly_chart(fig_kh, use_container_width=True)
 
-    # ── D. All-concept year trend (area) ─────────────────────────────────────
+    # â”€â”€ D. All-concept year trend (area) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if has_year and not concepts_df.empty and not documents_df.empty:
         st.markdown("##### Research Activity Over Time — All Concepts")
         st.caption("Stacked area shows the total chunk volume per year, coloured by concept.")
@@ -846,7 +1044,7 @@ with tab_science:
             )
             st.plotly_chart(fig_area, use_container_width=True)
 
-    # ── E. Top 5 docs per concept (grouped bar) ───────────────────────────────
+    # â”€â”€ E. Top 5 docs per concept (grouped bar) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if not top_docs_df.empty and not documents_df.empty:
         st.markdown("##### Top Document per Concept")
         st.caption("The single best-matching document (most chunks) for each concept.")
@@ -949,10 +1147,10 @@ with tab_domain:
         "Similar concepts appear close together; colour encodes concept family."
     )
 
-    # ── Build concept × keyword TF-IDF matrix from precomputed keywords ──────
+    # â”€â”€ Build concept Ã— keyword TF-IDF matrix from precomputed keywords â”€â”€â”€â”€â”€â”€
     def _build_concept_matrix(kw_df: pd.DataFrame):
         """
-        Pivot keywords_by_concept into a concept × keyword matrix.
+        Pivot keywords_by_concept into a concept Ã— keyword matrix.
         Returns (concept_names, numpy matrix) or ([], None) if data missing.
         """
         if kw_df.empty or not {"concept_name", "keyword", "weight"}.issubset(kw_df.columns):
@@ -966,7 +1164,7 @@ with tab_domain:
 
     concepts_list, kw_matrix = _build_concept_matrix(keywords_df)
 
-    # ── 3a. Concept Similarity Heatmap ───────────────────────────────────────
+    # â”€â”€ 3a. Concept Similarity Heatmap â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if kw_matrix is not None and len(concepts_list) > 1:
         sim = cosine_similarity(kw_matrix)
         sim_df = pd.DataFrame(sim, index=concepts_list, columns=concepts_list)
@@ -991,7 +1189,7 @@ with tab_domain:
         fig_sim.update_traces(textfont=dict(size=9))
         st.plotly_chart(fig_sim, use_container_width=True)
 
-    # ── 3b. PCA Cluster Scatter ───────────────────────────────────────────────
+    # â”€â”€ 3b. PCA Cluster Scatter â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if kw_matrix is not None and len(concepts_list) >= 3:
         st.markdown("##### Concept Cluster Map (PCA)")
         st.caption(
@@ -1007,7 +1205,7 @@ with tab_domain:
             "Concept": concepts_list,
             "PC1": coords[:, 0],
             "PC2": coords[:, 1] if n_comp > 1 else [0.0] * len(concepts_list),
-            "highlight": ["▶ " + c if c == selected_concept else c for c in concepts_list],
+            "highlight": ["â–¶ " + c if c == selected_concept else c for c in concepts_list],
         })
 
         # Add chunk counts as marker size
@@ -1066,7 +1264,7 @@ with tab_domain:
         ))
         st.plotly_chart(fig_pca, use_container_width=True)
 
-    # ── 3c. Multi-line concept trend over years ───────────────────────────────
+    # â”€â”€ 3c. Multi-line concept trend over years â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if has_year and not concepts_df.empty and not documents_df.empty:
         st.markdown("##### Concept Activity Over Time (Multi-line)")
         st.caption(
@@ -1127,7 +1325,7 @@ with tab_domain:
             ))
             st.plotly_chart(fig_trend, use_container_width=True)
 
-    # ── 3d. Per-concept keyword fingerprint (small multiples) ────────────────
+    # â”€â”€ 3d. Per-concept keyword fingerprint (small multiples) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if not keywords_df.empty:
         st.markdown("##### Keyword Fingerprint per Concept")
         st.caption(
@@ -1269,8 +1467,8 @@ with tab_snippets:
     if chunks_df.empty or not concept_chunk_ids:
         st.info("No snippets available for this concept.")
     else:
-        # Build a doc → filename lookup for the selectbox
-        doc_options: dict[str, list[int]] = {}   # label → list of chunk_ids
+        # Build a doc â†’ filename lookup for the selectbox
+        doc_options: dict[str, list[int]] = {}   # label â†’ list of chunk_ids
         doc_options["All documents"] = list(concept_chunk_ids)
 
         if not concept_rows.empty and not documents_df.empty:
@@ -1337,7 +1535,7 @@ with tab_snippets:
                 st.markdown(
                     f'<div class="co2m-snippet">'
                     f'<div class="meta">'
-                    f'{row["filename"]}&nbsp;·&nbsp;p.{row["page_number"]}{badge}'
+                    f'{row["filename"]}&nbsp;Â·&nbsp;p.{row["page_number"]}{badge}'
                     f'</div>'
                     f'<div class="body">{text}</div>'
                     f'</div>',
@@ -1349,196 +1547,35 @@ with tab_snippets:
 # ============================================================
 with tab_verify:
     st.markdown("### System Verification")
-    st.caption("Evaluate RAG pipeline health and performance")
-    
-    # Initialize verification (cached)
-    @st.cache_resource
-    def get_verification_service():
-        """Initialize verification service."""
+    st.caption("Check the live Postgres RAG backend and optional verification module")
+
+    if RAGQueryService is None:
+        st.warning("Verification is unavailable because semantic search dependencies could not be loaded.")
+        if _RAG_IMPORT_ERROR is not None:
+            st.code(str(_RAG_IMPORT_ERROR))
+    else:
         try:
             service = get_query_service()
-            verifier = RAGVerification(query_service=service)
-            return verifier
-        except Exception as e:
-            st.error(f"Failed to initialize verification: {e}")
-            raise
-    
-    try:
-        verifier = get_verification_service()
-        
-        # Run verification button
-        col1, col2 = st.columns([3, 1])
-        
-        with col2:
-            if st.button("Run Verification", key="verify_btn", use_container_width=True):
-                st.session_state.verification_results = None
-        
-        # Run verification if requested or display cached results
-        if "verification_results" not in st.session_state:
-            st.session_state.verification_results = verifier.run_all_verifications()
-        
-        results = st.session_state.verification_results
-        
-        # Display overall status
-        overall_status = results.get("overall_status", "unknown")
-        status_color = {
-            "healthy": "#10B981",
-            "degraded": "#F59E0B",
-            "failed": "#EF4444",
-        }.get(overall_status, "#6B7280")
-        
-        st.markdown(f"""
-        <div style="background-color:{status_color}20;border-left:4px solid {status_color};padding:12px;border-radius:4px;">
-        <div style="font-weight:600;color:{status_color};margin-bottom:4px;">System Status: {overall_status.upper()}</div>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # Display verification results in expandable sections
-        with st.expander("Vector Database Status", expanded=True):
-            vdb = results.get("vector_db", {})
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                st.metric("Documents Indexed", f"{vdb.get('document_count', 0):,}")
-            with col2:
-                st.metric("Status", vdb.get("status", "unknown").title())
-            with col3:
-                st.metric("Collection", vdb.get("collection_name", "unknown"))
-            
-            if vdb.get("error"):
-                st.error(f"Error: {vdb['error']}")
-        
-        with st.expander("Sample Query Test", expanded=False):
-            sq = results.get("sample_query", {})
-            col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
-                st.metric("Query", sq.get("query", "N/A")[:30] + "...")
-            with col2:
-                st.metric("Results", sq.get("results_count", 0))
-            with col3:
-                st.metric("Latency", f"{sq.get('latency_ms', 0):.0f} ms")
-            with col4:
-                st.metric("Avg Similarity", f"{sq.get('avg_similarity', 0):.3f}")
-            
-            if sq.get("top_result_file"):
-                st.info(f"Top result: {sq['top_result_file']} ({sq['top_result_similarity']:.1%} match)")
-            
-            if sq.get("error"):
-                st.error(f"Error: {sq['error']}")
-        
-        with st.expander("Batch Query Test", expanded=False):
-            bq = results.get("batch_queries", {})
-            col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
-                st.metric("Queries", bq.get("queries_count", 0))
-            with col2:
-                st.metric("Successful", bq.get("successful", 0))
-            with col3:
-                st.metric("Failed", bq.get("failed", 0))
-            with col4:
-                st.metric("Avg Latency", f"{bq.get('avg_latency_ms', 0):.1f} ms")
-            
-            st.metric("Avg Similarity", f"{bq.get('avg_similarity', 0):.3f}")
-            
-            if bq.get("errors"):
-                with st.expander("Errors"):
-                    for error in bq["errors"][:5]:
-                        st.caption(f"• {error}")
-        
-        with st.expander("Retrieval Quality Analysis", expanded=False):
-            rq = results.get("retrieval_quality", {})
-            col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
-                st.metric("Samples Tested", rq.get("samples_tested", 0))
-            with col2:
-                st.metric("Avg Top Similarity", f"{rq.get('avg_top_result_similarity', 0):.3f}")
-            with col3:
-                st.metric("Min Similarity", f"{rq.get('min_similarity', 1.0):.3f}")
-            with col4:
-                st.metric("Max Similarity", f"{rq.get('max_similarity', 0):.3f}")
-            
-            st.metric("Median Similarity", f"{rq.get('median_similarity', 0):.3f}")
-            st.metric("Relevance Score", f"{rq.get('relevance_score', 0):.3f}")
-            
-            if rq.get("error"):
-                st.error(f"Error: {rq['error']}")
-        
-        # Get reliability score
-        reliability = results.get("reliability_score", {}) or {}
-        rel_score = reliability.get("score", 0)
-        rel_color = reliability.get("color", "#6B7280")
-        rel_status = reliability.get("status", "Unknown")
-        rel_breakdown = reliability.get("breakdown", "Run verification to calculate reliability score")
-        
-        # Display Reliability Score prominently
-        st.markdown("---")
-        st.markdown(f"""
-        <div style="background: linear-gradient(135deg, {rel_color}15 0%, {rel_color}30 100%); 
-                    border: 2px solid {rel_color}; padding: 24px; border-radius: 8px; text-align: center;">
-            <div style="font-size: 14px; color: {rel_color}; margin-bottom: 8px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px;">Reliability Score</div>
-            <div style="font-size: 48px; font-weight: 700; color: {rel_color}; margin-bottom: 8px;">{rel_score}%</div>
-            <div style="font-size: 16px; color: {rel_color}; font-weight: 600;">{rel_status}</div>
-            <div style="font-size: 12px; color: #6B7280; margin-top: 12px; line-height: 1.6;">
-                {rel_breakdown}
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # Detailed component breakdown
-        if reliability and reliability.get("components"):
-            with st.expander("Reliability Score Breakdown", expanded=False):
-                st.markdown("**Component Scores (weighted):**")
-                components = reliability.get("components", {})
-                
-                comp_cols = st.columns(4)
-                
-                with comp_cols[0]:
-                    comp_score = components.get("database_health", 0)
-                    st.metric("Database Health", f"{comp_score}%")
-                
-                with comp_cols[1]:
-                    comp_score = components.get("query_success", 0)
-                    st.metric("Query Success", f"{comp_score}%")
-                
-                with comp_cols[2]:
-                    comp_score = components.get("retrieval_quality", 0)
-                    st.metric("Retrieval Quality", f"{comp_score}%")
-                
-                with comp_cols[3]:
-                    comp_score = components.get("performance", 0)
-                    st.metric("Performance", f"{comp_score}%")
-                
-                st.info("""
-                **Scoring Methodology:**
-                - **Database Health (25%)**: Connectivity and document count
-                - **Query Success (25%)**: Batch query success rate
-                - **Retrieval Quality (30%)**: Semantic relevance of results
-                - **Performance (20%)**: Query latency efficiency
-                
-                **Reliability Scale:**
-                - 85%+ : Excellent performance
-                - 70-84% : Good performance
-            - 50-69% : Fair performance
-            - <50% : Poor performance
-            """)
-        
-        # Summary dashboard
-        st.markdown("### Verification Summary")
-        summary_cols = st.columns(4)
-        
-        with summary_cols[0]:
-            st.metric("Health", results.get("overall_status", "unknown").title())
-        with summary_cols[1]:
-            st.metric("Indexed", f"{vdb.get('document_count', 0):,}")
-        with summary_cols[2]:
-            sq = results.get("sample_query", {})
-            st.metric("Query Time", f"{sq.get('latency_ms', 0):.0f}ms")
-        with summary_cols[3]:
-            st.metric("Reliability", f"{rel_score}%")
-    
-    except Exception as e:
-        st.error(f"Verification failed: {e}")
-        st.info("Make sure the RAG pipeline is properly initialized.")
+            stats = service.get_stats()
+            llm_status = service.get_llm_status()
+            v1, v2, v3 = st.columns(3)
+            v1.metric("Postgres Documents", f"{stats['total_documents']:,}")
+            v2.metric("Embedded Chunks", f"{stats['embedded_chunks']:,}")
+            v3.metric("Unique Documents", f"{stats['unique_documents']:,}")
+            st.caption(
+                f"Backend: {stats.get('backend')} Â· "
+                f"LLM: {llm_status.get('provider')} "
+                f"({'available' if llm_status.get('available') else 'unavailable'})"
+            )
+            if RAGVerification is None:
+                st.info("Detailed verification is unavailable because the optional verification module is not installed.")
+                if _VERIFICATION_IMPORT_ERROR is not None:
+                    st.code(str(_VERIFICATION_IMPORT_ERROR))
+            else:
+                verifier = RAGVerification(query_service=service)
+                if st.button("Run Verification", key="verify_btn", use_container_width=True):
+                    st.session_state.verification_results = verifier.run_all_verifications()
+                if "verification_results" in st.session_state:
+                    st.json(st.session_state.verification_results)
+        except Exception as exc:
+            st.error(f"Verification failed: {exc}")

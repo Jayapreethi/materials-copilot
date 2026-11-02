@@ -138,10 +138,21 @@ class PostgresCorpusStore:
         return "[" + ",".join(str(float(value)) for value in values) + "]"
 
     def search(
-        self, embedding: list[float], top_k: int = 5, unique_only: bool = False
+        self,
+        embedding: list[float],
+        top_k: int = 5,
+        unique_only: bool = False,
+        trl_proxy: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         vector = self.vector_literal(embedding)
-        unique_clause = "AND d.is_unique = true" if unique_only else ""
+        conditions = ["c.embedding IS NOT NULL"]
+        parameters: list[Any] = [vector]
+        if unique_only:
+            conditions.append("d.is_unique = true")
+        if trl_proxy:
+            conditions.append("d.metadata->'scale_derived_trl_proxy'->>'classification' = %s")
+            parameters.append(trl_proxy)
+        parameters.extend([vector, top_k])
         with self.connect() as connection:
             return connection.execute(
                 f"""
@@ -151,11 +162,11 @@ class PostgresCorpusStore:
                        c.embedding <=> %s::vector AS distance
                 FROM chunks c
                 JOIN documents d ON d.document_id = c.document_id
-                WHERE c.embedding IS NOT NULL {unique_clause}
+                WHERE {' AND '.join(conditions)}
                 ORDER BY c.embedding <=> %s::vector
                 LIMIT %s
                 """,
-                (vector, vector, top_k),
+                parameters,
             ).fetchall()
 
     def stats(self) -> dict[str, int]:
