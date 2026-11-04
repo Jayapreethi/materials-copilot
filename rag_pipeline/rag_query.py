@@ -18,6 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from embeddings.embeddings import EmbeddingGenerator
+from local_llm import LocalTransformersModel
 from vector_db.postgres_corpus_store import PostgresCorpusStore
 
 SYSTEM_PROMPT = (
@@ -58,18 +59,33 @@ def ollama_chat(base_url: str, model: str, question: str, context: str, timeout:
     return payload["message"]["content"]
 
 
+def transformers_chat(local_model: LocalTransformersModel, question: str, context: str) -> str:
+    return local_model.generate_text(
+        SYSTEM_PROMPT,
+        f"Sources:\n{context}\n\nQuestion: {question}",
+        max_new_tokens=2048,
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("question")
     parser.add_argument("--top-k", type=int, default=6)
     parser.add_argument("--dsn", default=None)
     parser.add_argument("--schema", default="public", help="PostgreSQL schema containing the corpus")
+    parser.add_argument("--backend", choices=("ollama", "transformers"), default="ollama")
     parser.add_argument("--ollama-url", default="http://127.0.0.1:11434")
-    parser.add_argument("--model", default="qwen3:8b")
+    parser.add_argument("--model", default=None, help="Ollama model name or local Hugging Face model directory")
+    parser.add_argument("--device-map", default="auto")
+    parser.add_argument("--torch-dtype", choices=("auto", "bfloat16", "float16", "float32"), default="auto")
+    parser.add_argument("--allow-model-download", action="store_true", help="Allow Transformers to download a model if it is not cached locally")
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--no-generate", action="store_true", help="Only print retrieved chunks, skip LLM call")
     parser.add_argument("--all-documents", action="store_true", help="Include duplicate PDFs, not just the unique set")
     args = parser.parse_args()
+    args.model = args.model or ("qwen3:8b" if args.backend == "ollama" else None)
+    if args.backend == "transformers" and not args.model:
+        parser.error("--model must be a local Hugging Face model directory for --backend transformers")
 
     embedder = EmbeddingGenerator()
     store = PostgresCorpusStore(dsn=args.dsn, schema=args.schema)
@@ -91,7 +107,16 @@ def main() -> None:
         return
 
     print("\nGenerating answer...\n")
-    answer = ollama_chat(args.ollama_url, args.model, args.question, context, args.timeout)
+    if args.backend == "ollama":
+        answer = ollama_chat(args.ollama_url, args.model, args.question, context, args.timeout)
+    else:
+        local_model = LocalTransformersModel(
+            args.model,
+            device_map=args.device_map,
+            torch_dtype=args.torch_dtype,
+            local_files_only=not args.allow_model_download,
+        )
+        answer = transformers_chat(local_model, args.question, context)
     print(answer)
 
 

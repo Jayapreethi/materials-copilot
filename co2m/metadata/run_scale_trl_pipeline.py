@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT))
 
 from generate_qwen_metadata import parse_json_response
 from ingest_postgres import parse_pdf
+from local_llm import LocalTransformersModel
 
 SCALE_PAGE_TERMS = re.compile(
     r"\b(?:scale[- ]?up|scale[- ]?down|laboratory|lab[- ]scale|bench[- ]scale|"
@@ -209,6 +210,40 @@ def check_ollama(base_url: str, model: str) -> None:
         raise ConnectionError(f"Model {model!r} is not available through {base_url}; found: {available}")
 
 
+def call_model(
+    args: argparse.Namespace,
+    local_model: LocalTransformersModel | None,
+    system_prompt: str,
+    user_prompt: str,
+    schema: dict[str, Any],
+    num_predict: int,
+) -> dict[str, Any]:
+    if args.backend == "ollama":
+        return call_ollama(
+            args.ollama_url,
+            args.model,
+            system_prompt,
+            user_prompt,
+            schema,
+            args.timeout,
+            args.context_length,
+            num_predict,
+        )
+    if local_model is None:
+        raise RuntimeError("Local Transformers model was not initialized")
+    parsed = parse_json_response(
+        local_model.generate_text(
+            system_prompt,
+            user_prompt,
+            max_new_tokens=num_predict,
+            schema=schema,
+        )
+    )
+    if not isinstance(parsed, dict):
+        raise ValueError("Local model response was not a JSON object")
+    return parsed
+
+
 def load_targets(path: Path) -> list[dict[str, Any]]:
     records = json.loads(path.read_text(encoding="utf-8-sig"))
     if not isinstance(records, list) or not all(isinstance(record, dict) for record in records):
@@ -252,7 +287,11 @@ def write_issue(path: Path, filename: str, source_path: Path | None, error: Exce
         handle.flush()
 
 
-def process_pdf(pdf_path: Path, args: argparse.Namespace) -> dict[str, Any]:
+def process_pdf(
+    pdf_path: Path,
+    args: argparse.Namespace,
+    local_model: LocalTransformersModel | None = None,
+) -> dict[str, Any]:
     pages = parse_pdf(pdf_path)
     document_text, source_pages = scale_representative_text(pages, args.max_chars)
     if not document_text:
@@ -261,11 +300,11 @@ def process_pdf(pdf_path: Path, args: argparse.Namespace) -> dict[str, Any]:
     extraction = None
     for attempt in range(args.retries + 1):
         try:
-            extraction = call_ollama(
-                args.ollama_url, args.model, EXTRACTION_SYSTEM_PROMPT,
+            extraction = call_model(
+                args, local_model, EXTRACTION_SYSTEM_PROMPT,
                 "Analyze this scientific document. Extract factual scale evidence only.\n\n"
                 "DOCUMENT TEXT:\n" + document_text,
-                EXTRACTION_SCHEMA, args.timeout, args.context_length, args.num_predict,
+                EXTRACTION_SCHEMA, args.num_predict,
             )
             break
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, KeyError, ValueError):
@@ -277,11 +316,11 @@ def process_pdf(pdf_path: Path, args: argparse.Namespace) -> dict[str, Any]:
     extracted_json = json.dumps(extraction, ensure_ascii=False, indent=2)
     for attempt in range(args.retries + 1):
         try:
-            classifier = call_ollama(
-                args.ollama_url, args.model, CLASSIFIER_SYSTEM_PROMPT,
+            classifier = call_model(
+                args, local_model, CLASSIFIER_SYSTEM_PROMPT,
                 "Classify this extracted evidence. Do not read additional source material.\n\n"
                 "EXTRACTED EVIDENCE JSON:\n" + extracted_json,
-                CLASSIFIER_SCHEMA, args.timeout, args.context_length, 1024,
+                CLASSIFIER_SCHEMA, 1024,
             )
             break
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, KeyError, ValueError):
@@ -342,8 +381,12 @@ def main() -> None:
     parser.add_argument("--pdf-dir", type=Path, default=ROOT / "all_pdfs")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="Resumable tagged JSONL output")
     parser.add_argument("--report", type=Path, default=None, help="Coverage JSON path; defaults next to --output")
-    parser.add_argument("--model", default="qwen3-next:80b")
+    parser.add_argument("--backend", choices=("ollama", "transformers"), default="ollama")
+    parser.add_argument("--model", default=None, help="Ollama model name or local Hugging Face model directory")
     parser.add_argument("--ollama-url", default="http://127.0.0.1:11434")
+    parser.add_argument("--device-map", default="auto", help="Transformers device map, typically auto on HPC")
+    parser.add_argument("--torch-dtype", choices=("auto", "bfloat16", "float16", "float32"), default="auto")
+    parser.add_argument("--allow-model-download", action="store_true", help="Allow Transformers to download a model if it is not cached locally")
     parser.add_argument("--max-chars", type=int, default=60000)
     parser.add_argument("--context-length", type=int, default=40960)
     parser.add_argument("--num-predict", type=int, default=4096)
@@ -351,6 +394,9 @@ def main() -> None:
     parser.add_argument("--retries", type=int, default=2)
     parser.add_argument("--limit", type=int, default=0, help="Process only the first N pending target PDFs")
     args = parser.parse_args()
+    args.model = args.model or ("qwen3-next:80b" if args.backend == "ollama" else None)
+    if args.backend == "transformers" and not args.model:
+        parser.error("--model must be a local Hugging Face model directory for --backend transformers")
 
     targets = load_targets(args.targets)
     target_names = [record.get("document", {}).get("filename") for record in targets]
@@ -375,11 +421,20 @@ def main() -> None:
         pending = pending[:args.limit]
     print(f"targets={len(target_names)} completed={len(completed)} pending_this_run={len(pending)}", flush=True)
 
+    local_model = None
     if pending:
-        check_ollama(args.ollama_url, args.model)
+        if args.backend == "ollama":
+            check_ollama(args.ollama_url, args.model)
+        else:
+            local_model = LocalTransformersModel(
+                args.model,
+                device_map=args.device_map,
+                torch_dtype=args.torch_dtype,
+                local_files_only=not args.allow_model_download,
+            )
     for index, pdf_path in enumerate(pending, start=1):
         try:
-            record = process_pdf(pdf_path, args)
+            record = process_pdf(pdf_path, args, local_model)
             with args.output.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
                 handle.flush()

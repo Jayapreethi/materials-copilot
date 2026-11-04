@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from ingest_postgres import parse_pdf
+from local_llm import LocalTransformersModel
 
 
 METADATA_SCHEMA = {
@@ -272,6 +273,23 @@ def ollama_extract(
     return metadata
 
 
+def transformers_extract(
+    local_model: LocalTransformersModel,
+    text: str,
+    num_predict: int = 4096,
+) -> dict[str, Any]:
+    response = local_model.generate_text(
+        SYSTEM_PROMPT,
+        "Extract metadata from this PDF text:\n" + text,
+        max_new_tokens=num_predict,
+        schema=METADATA_SCHEMA,
+    )
+    metadata = parse_json_response(response)
+    normalize_trl_assessment(metadata)
+    validate_trl_assessment(metadata)
+    return metadata
+
+
 def normalize_trl_assessment(metadata: dict[str, Any]) -> None:
     evidence_ids = {
         item["evidence_id"]
@@ -439,9 +457,13 @@ def check_ollama_server(url: str, model: str | None = None) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pdf-dir", type=Path, default=Path("all_pdfs"))
-    parser.add_argument("--output", type=Path, default=Path("co2m/metadata/qwen_metadata.jsonl"))
-    parser.add_argument("--model", default="qwen3:8b")
+    parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument("--backend", choices=("ollama", "transformers"), default="ollama")
+    parser.add_argument("--model", default=None, help="Ollama model name or local Hugging Face model directory")
     parser.add_argument("--ollama-url", default="http://127.0.0.1:11434")
+    parser.add_argument("--device-map", default="auto")
+    parser.add_argument("--torch-dtype", choices=("auto", "bfloat16", "float16", "float32"), default="auto")
+    parser.add_argument("--allow-model-download", action="store_true", help="Allow Transformers to download a model if it is not cached locally")
     parser.add_argument("--max-chars", type=int, default=60000)
     parser.add_argument("--context-length", type=int, default=40960)
     parser.add_argument("--num-predict", type=int, default=4096, help="Max output tokens for the model response; increase if JSON responses are truncated.")
@@ -451,6 +473,14 @@ def main() -> None:
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--deduplicate-only", action="store_true")
     args = parser.parse_args()
+    args.output = args.output or Path(
+        "co2m/metadata/llama_metadata.jsonl"
+        if args.backend == "transformers"
+        else "co2m/metadata/qwen_metadata.jsonl"
+    )
+    args.model = args.model or ("qwen3:8b" if args.backend == "ollama" else None)
+    if args.backend == "transformers" and not args.model and not args.deduplicate_only:
+        parser.error("--model must be a local Hugging Face model directory for --backend transformers")
 
     if args.deduplicate_only:
         before = sum(1 for line in args.output.read_text(encoding="utf-8").splitlines() if line)
@@ -468,8 +498,17 @@ def main() -> None:
     print(f"pdfs={len(pdfs)} completed={len(completed)} pending={len(pending)}")
     output_mode = "w" if args.force else "a"
     cause_of_ending = "completed"
+    local_model = None
     if pending:
-        check_ollama_server(args.ollama_url, args.model)
+        if args.backend == "ollama":
+            check_ollama_server(args.ollama_url, args.model)
+        else:
+            local_model = LocalTransformersModel(
+                args.model,
+                device_map=args.device_map,
+                torch_dtype=args.torch_dtype,
+                local_files_only=not args.allow_model_download,
+            )
     with args.output.open(output_mode, encoding="utf-8") as output:
         for index, pdf_path in enumerate(pending, 1):
             try:
@@ -479,14 +518,17 @@ def main() -> None:
                     raise ValueError("PDF contains no extractable text")
                 for attempt in range(args.retries + 1):
                     try:
-                        metadata = ollama_extract(
-                            args.ollama_url,
-                            args.model,
-                            text,
-                            args.timeout,
-                            args.context_length,
-                            args.num_predict,
-                        )
+                        if args.backend == "ollama":
+                            metadata = ollama_extract(
+                                args.ollama_url,
+                                args.model,
+                                text,
+                                args.timeout,
+                                args.context_length,
+                                args.num_predict,
+                            )
+                        else:
+                            metadata = transformers_extract(local_model, text, args.num_predict)
                         break
                     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, KeyError, ValueError):
                         if attempt == args.retries:

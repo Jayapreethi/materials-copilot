@@ -168,11 +168,22 @@ class PostgresCorpusStore:
             unique_documents = connection.execute(
                 "SELECT COUNT(*) AS n FROM documents WHERE is_unique = true"
             ).fetchone()["n"]
+            unique_chunk_counts = connection.execute(
+                """
+                SELECT COUNT(c.chunk_id) AS chunks,
+                       COUNT(c.chunk_id) FILTER (WHERE c.embedding IS NOT NULL) AS embedded_chunks
+                FROM chunks c
+                JOIN documents d ON d.document_id = c.document_id
+                WHERE d.is_unique = true
+                """
+            ).fetchone()
         return {
             "documents": documents,
             "chunks": chunks,
             "embedded_chunks": embedded,
             "unique_documents": unique_documents,
+            "unique_chunks": unique_chunk_counts["chunks"],
+            "unique_embedded_chunks": unique_chunk_counts["embedded_chunks"],
         }
 
     def mark_unique_documents(self, filenames: set[str]) -> dict[str, int]:

@@ -32,12 +32,14 @@ if str(PROJECT_ROOT) not in sys.path:
 # (for example on Windows) prevents the embedding stack from being imported.
 try:
     from rag_pipeline.query_service import RAGQueryService
-    from rag_pipeline.verification import RAGVerification
     _RAG_IMPORT_ERROR = None
 except Exception as exc:  # pragma: no cover - exercised in runtime fallback
     RAGQueryService = None
-    RAGVerification = None
     _RAG_IMPORT_ERROR = exc
+try:
+    from rag_pipeline.verification import RAGVerification
+except Exception:  # Verification is optional; semantic search has its own dependencies.
+    RAGVerification = None
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -227,6 +229,31 @@ concept_counts_df= data["concept_counts"]
 top_docs_df      = data["top_documents_by_concept"]
 keywords_df      = data["keywords_by_concept"]
 
+
+@st.cache_resource
+def get_query_service():
+    if RAGQueryService is None:
+        return None
+    return RAGQueryService(
+        embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+        vector_store_path=str(PROJECT_ROOT / "vector_db" / "data"),
+        collection_name="co2m_corpus",
+        device="cpu",
+    )
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_rag_stats() -> dict:
+    service = get_query_service()
+    return service.get_stats() if service is not None else {}
+
+
+try:
+    rag_stats = load_rag_stats()
+except Exception as exc:
+    logger.warning("Could not load Postgres RAG stats: %s", exc)
+    rag_stats = {}
+
 has_year = (
     not documents_df.empty
     and "year" in documents_df.columns
@@ -274,11 +301,17 @@ keyword_search: str = st.sidebar.text_input("Snippet keyword", placeholder="filt
 
 st.sidebar.markdown("---")
 if manifest:
-    st.sidebar.markdown("**Corpus**")
+    st.sidebar.markdown("**Concept analytics artifacts**")
     st.sidebar.markdown(
         f"PDFs: **{manifest.get('pdf_count','—')}**  \n"
         f"Chunks: **{manifest.get('chunk_count','—')}**  \n"
         f"Assignments: **{manifest.get('concept_assignment_count','—')}**"
+    )
+if rag_stats:
+    st.sidebar.markdown("**RAG corpus (Postgres)**")
+    st.sidebar.markdown(
+        f"Unique PDFs: **{rag_stats.get('unique_documents', 0):,}**  \n"
+        f"Embedded chunks: **{rag_stats.get('unique_embedded_chunks', 0):,}**"
     )
 
 # ---------------------------------------------------------------------------
@@ -300,16 +333,18 @@ if year_filter and has_year and not documents_df.empty:
 # ---------------------------------------------------------------------------
 # Metrics
 # ---------------------------------------------------------------------------
-total_pdfs = len(documents_df) if not documents_df.empty else 0
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("Total PDFs", f"{total_pdfs:,}")
-m2.metric("Matching PDFs", f"{len(concept_doc_ids):,}")
-m3.metric("Matching Chunks", f"{len(concept_chunk_ids):,}")
+m1, m2, m3, m4, m5 = st.columns(5)
+m1.metric("Unique PDFs (RAG)", f"{rag_stats['unique_documents']:,}" if rag_stats else "Unavailable")
+m2.metric("Embedded chunks (RAG)", f"{rag_stats['unique_embedded_chunks']:,}" if rag_stats else "Unavailable")
+m3.metric("Concept PDFs (artifacts)", f"{len(concept_doc_ids):,}")
+m4.metric("Concept chunks (artifacts)", f"{len(concept_chunk_ids):,}")
 if has_year and concept_doc_ids and not documents_df.empty:
     yr_s = documents_df.loc[documents_df["doc_id"].isin(concept_doc_ids), "year"].dropna()
-    m4.metric("Peak Year", str(int(yr_s.mode().iloc[0])) if not yr_s.empty else "—")
+    m5.metric("Peak Year", str(int(yr_s.mode().iloc[0])) if not yr_s.empty else "—")
 else:
-    m4.metric("Total Chunks", f"{len(chunks_df):,}" if not chunks_df.empty else "0")
+    m5.metric("Artifact chunks", f"{len(chunks_df):,}" if not chunks_df.empty else "0")
+if rag_stats:
+    st.caption("RAG counts use the full Postgres corpus; concept summaries and charts use the dashboard artifacts shown separately.")
 
 # ---------------------------------------------------------------------------
 # Concept summary
@@ -350,27 +385,15 @@ with tab_rag:
         st.info("This can happen on Windows when a native dependency such as a DLL is missing. Install or repair the embedding stack and reload the app.")
         st.stop()
 
-    # Initialize service (cached)
-    @st.cache_resource
-    def get_query_service():
-        """Load query service once."""
-        try:
-            service = RAGQueryService(
-                embedding_model="sentence-transformers/all-MiniLM-L6-v2",
-                vector_store_path=str(PROJECT_ROOT / "vector_db" / "data"),
-                collection_name="co2m_corpus",
-                device="cpu",
-            )
-            return service
-        except Exception as e:
-            st.error(f"Failed to initialize RAG system: {e}")
-            st.info("Make sure the vector database is populated. Run: `python ingest_enhanced.py`")
-            raise
-
     try:
         query_service = get_query_service()
-        stats = query_service.get_stats()
-        st.info(f"Vector DB: {stats.get('total_documents', 0):,} documents indexed")
+        if query_service is None:
+            raise RuntimeError("RAG query service could not be imported")
+        stats = rag_stats or query_service.get_stats()
+        st.info(
+            f"Vector DB: {stats.get('unique_documents', 0):,} unique PDFs, "
+            f"{stats.get('unique_embedded_chunks', 0):,} embedded chunks"
+        )
     except Exception:
         st.stop()
 
@@ -415,7 +438,7 @@ with tab_rag:
             else:
                 st.caption(f"✓ {provider}")
         else:
-            st.caption("⚠️ AI not available. Install Ollama or set API keys for free/paid LLM access")
+            st.caption("Set CO2M_LLM_MODEL to a local Llama checkpoint directory to enable generation")
     
     if concept_filter == "None":
         concept_filter = None
@@ -440,15 +463,16 @@ with tab_rag:
     
     if query and search_clicked:
         try:
-            search_msg = "Searching with AI..." if llm_status.get("available") else "Searching semantically..."
+            use_local_llm = use_llm and llm_status.get("available")
+            search_msg = "Searching with local Llama..." if use_local_llm else "Searching semantically..."
             with st.spinner(search_msg):
-                if llm_status.get("available"):
+                if use_local_llm:
                     results = query_service.generate_with_llm(
                         question=query,
                         top_k=top_k,
                         concept_filter=concept_filter,
                         temperature=0.7,
-                        max_tokens=500,
+                        max_tokens=128,
                     )
                 else:
                     results = query_service.query(
@@ -1350,6 +1374,10 @@ with tab_snippets:
 with tab_verify:
     st.markdown("### System Verification")
     st.caption("Evaluate RAG pipeline health and performance")
+
+    if RAGVerification is None:
+        st.info("System verification is unavailable because its optional module is not installed in this branch.")
+        st.stop()
     
     # Initialize verification (cached)
     @st.cache_resource

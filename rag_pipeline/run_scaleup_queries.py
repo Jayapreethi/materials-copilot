@@ -11,7 +11,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from embeddings.embeddings import EmbeddingGenerator
-from rag_pipeline.rag_query import build_context, ollama_chat
+from local_llm import LocalTransformersModel
+from rag_pipeline.rag_query import build_context, ollama_chat, transformers_chat
 from vector_db.postgres_corpus_store import PostgresCorpusStore
 
 
@@ -45,15 +46,30 @@ def main() -> None:
     parser.add_argument("--schema", default="co2m_unique")
     parser.add_argument("--top-k", type=int, default=8)
     parser.add_argument("--dsn", default=None)
+    parser.add_argument("--backend", choices=("ollama", "transformers"), default="ollama")
     parser.add_argument("--ollama-url", default="http://127.0.0.1:11434")
-    parser.add_argument("--model", default="qwen3:8b")
+    parser.add_argument("--model", default=None, help="Ollama model name or local Hugging Face model directory")
+    parser.add_argument("--device-map", default="auto")
+    parser.add_argument("--torch-dtype", choices=("auto", "bfloat16", "float16", "float32"), default="auto")
+    parser.add_argument("--allow-model-download", action="store_true", help="Allow Transformers to download a model if it is not cached locally")
     parser.add_argument("--timeout", type=int, default=180)
     parser.add_argument("--no-generate", action="store_true", help="Retrieve source chunks without calling Ollama")
     parser.add_argument("--output", type=Path, default=Path("co2m/metadata/scaleup_query_results.json"))
     args = parser.parse_args()
+    args.model = args.model or ("qwen3:8b" if args.backend == "ollama" else None)
+    if not args.no_generate and args.backend == "transformers" and not args.model:
+        parser.error("--model must be a local Hugging Face model directory for --backend transformers")
 
     embedder = EmbeddingGenerator()
     store = PostgresCorpusStore(dsn=args.dsn, schema=args.schema)
+    local_model = None
+    if not args.no_generate and args.backend == "transformers":
+        local_model = LocalTransformersModel(
+            args.model,
+            device_map=args.device_map,
+            torch_dtype=args.torch_dtype,
+            local_files_only=not args.allow_model_download,
+        )
     vectors = embedder.embed([question for _, question in QUESTIONS]).tolist()
     results: list[dict] = []
     for number, ((topic, question), vector) in enumerate(zip(QUESTIONS, vectors), 1):
@@ -70,7 +86,11 @@ def main() -> None:
         result = {"number": number, "topic": topic, "question": question, "sources": sources}
         if not args.no_generate:
             try:
-                result["answer"] = ollama_chat(args.ollama_url, args.model, question, build_context(chunks), args.timeout)
+                context = build_context(chunks)
+                if args.backend == "ollama":
+                    result["answer"] = ollama_chat(args.ollama_url, args.model, question, context, args.timeout)
+                else:
+                    result["answer"] = transformers_chat(local_model, question, context)
             except Exception as exc:
                 result["error"] = f"{type(exc).__name__}: {exc}"
         results.append(result)

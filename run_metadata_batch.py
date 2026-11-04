@@ -15,7 +15,13 @@ from pathlib import Path
 
 from export_qwen80b_metadata import convert_record
 from format_qwen80b_100_metadata import normalize_ids
-from generate_qwen_metadata import ollama_extract, parse_pdf, representative_text
+from generate_qwen_metadata import (
+    ollama_extract,
+    parse_pdf,
+    representative_text,
+    transformers_extract,
+)
+from local_llm import LocalTransformersModel
 
 
 ROOT = Path(__file__).resolve().parent
@@ -119,14 +125,17 @@ def extract_pdf(pdf_path: Path, args: argparse.Namespace) -> dict:
 
     for attempt in range(args.retries + 1):
         try:
-            metadata = ollama_extract(
-                args.ollama_url,
-                args.model,
-                text,
-                args.timeout,
-                args.context_length,
-                args.num_predict,
-            )
+            if args.backend == "ollama":
+                metadata = ollama_extract(
+                    args.ollama_url,
+                    args.model,
+                    text,
+                    args.timeout,
+                    args.context_length,
+                    args.num_predict,
+                )
+            else:
+                metadata = transformers_extract(args.local_model, text, args.num_predict)
             break
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, KeyError, ValueError):
             if attempt == args.retries:
@@ -156,19 +165,26 @@ def main() -> None:
         help="Optional newline-delimited PDF filenames to process from --pdf-dir.",
     )
     parser.add_argument("--output-dir", type=Path, default=ROOT / "co2m" / "metadata")
-    parser.add_argument("--name", help="Artifact name stem. Defaults to qwen80b_<count>_pdfs_metadata.")
+    parser.add_argument("--name", help="Artifact name stem; defaults to a backend-specific name.")
     parser.add_argument("--raw-input", type=Path, help="Existing JSONL metadata to format instead of the default raw-output path.")
     parser.add_argument("--format-only", action="store_true", help="Skip extraction and only create the formatted JSON and issue reports.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing formatted JSON file instead of creating a new file.")
     parser.add_argument("--max-consecutive-errors", type=int, default=10, help="Stop run after this many consecutive connection/timeout errors (0 for unlimited). Per-PDF failures are skipped and logged instead.")
-    parser.add_argument("--model", default="qwen3-next:80b")
+    parser.add_argument("--backend", choices=("ollama", "transformers"), default="ollama")
+    parser.add_argument("--model", default=None, help="Ollama model name or local Hugging Face model directory")
     parser.add_argument("--ollama-url", default="http://localhost:11434")
+    parser.add_argument("--device-map", default="auto")
+    parser.add_argument("--torch-dtype", choices=("auto", "bfloat16", "float16", "float32"), default="auto")
+    parser.add_argument("--allow-model-download", action="store_true", help="Allow Transformers to download a model if it is not cached locally")
     parser.add_argument("--max-chars", type=int, default=60000)
     parser.add_argument("--context-length", type=int, default=40960)
     parser.add_argument("--num-predict", type=int, default=8192, help="Max output tokens for the model response; increase if JSON responses are truncated.")
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--retries", type=int, default=2)
     args = parser.parse_args()
+    args.model = args.model or ("qwen3-next:80b" if args.backend == "ollama" else None)
+    if args.backend == "transformers" and not args.model and not args.format_only:
+        parser.error("--model must be a local Hugging Face model directory for --backend transformers")
 
     if args.count < 1:
         parser.error("--count must be at least 1")
@@ -187,7 +203,12 @@ def main() -> None:
         parser.error(f"Only {len(selected_pdfs)} PDFs found in {args.pdf_dir}")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    name = args.name or f"qwen80b_{args.count}_pdfs_metadata"
+    default_name = (
+        f"local_llama_{args.count}_pdfs_metadata"
+        if args.backend == "transformers"
+        else f"qwen80b_{args.count}_pdfs_metadata"
+    )
+    name = args.name or default_name
     raw_path = args.raw_input or args.output_dir / f"{name}.jsonl"
     formatted_path = args.output_dir / f"{name}.json"
     issues_jsonl_path = args.output_dir / f"{name}_issues.jsonl"
@@ -201,9 +222,18 @@ def main() -> None:
 
     cause_of_ending = "completed"
     consecutive_errors = 0
+    args.local_model = None
 
     if pending:
-        check_ollama_server(args.ollama_url, args.model)
+        if args.backend == "ollama":
+            check_ollama_server(args.ollama_url, args.model)
+        else:
+            args.local_model = LocalTransformersModel(
+                args.model,
+                device_map=args.device_map,
+                torch_dtype=args.torch_dtype,
+                local_files_only=not args.allow_model_download,
+            )
         with raw_path.open("a", encoding="utf-8") as output:
             for index, pdf_path in enumerate(pending, start=1):
                 try:
