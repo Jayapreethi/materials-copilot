@@ -5,6 +5,41 @@ from __future__ import annotations
 import json
 from typing import Any
 
+QUANTIZATION_CHOICES = ("none", "int4", "int8", "fp8")
+
+
+def _resolve_model_class(model_path: str, local_files_only: bool):
+    """Pick the model class based on the checkpoint's own config, not a user guess."""
+    from transformers import AutoConfig
+
+    config = AutoConfig.from_pretrained(model_path, local_files_only=local_files_only)
+    architectures = getattr(config, "architectures", None) or []
+    if any("Llama4" in name for name in architectures):
+        from transformers import Llama4ForConditionalGeneration
+
+        return Llama4ForConditionalGeneration, True
+    from transformers import AutoModelForCausalLM
+
+    return AutoModelForCausalLM, False
+
+
+def _build_quantization_config(quantization: str):
+    if quantization == "none":
+        return None
+    if quantization in ("int4", "int8"):
+        from transformers import BitsAndBytesConfig
+
+        return BitsAndBytesConfig(
+            load_in_4bit=quantization == "int4",
+            load_in_8bit=quantization == "int8",
+            bnb_4bit_compute_dtype="bfloat16",
+        )
+    if quantization == "fp8":
+        from transformers import FbgemmFp8Config
+
+        return FbgemmFp8Config()
+    raise ValueError(f"Unsupported quantization: {quantization!r}; choose from {QUANTIZATION_CHOICES}")
+
 
 class LocalTransformersModel:
     def __init__(
@@ -13,10 +48,12 @@ class LocalTransformersModel:
         device_map: str = "auto",
         torch_dtype: str = "auto",
         local_files_only: bool = True,
+        quantization: str = "none",
+        attn_implementation: str | None = None,
     ) -> None:
         try:
             import torch
-            from transformers import AutoModelForCausalLM, AutoTokenizer
+            from transformers import AutoTokenizer
         except ImportError as error:
             raise RuntimeError(
                 "Local inference requires PyTorch and Transformers. Install them in the HPC environment."
@@ -27,6 +64,8 @@ class LocalTransformersModel:
             dtype = getattr(torch, torch_dtype, None)
             if dtype is None:
                 raise ValueError(f"Unsupported torch dtype: {torch_dtype}")
+
+        model_class, self.is_llama4 = _resolve_model_class(model_path, local_files_only)
 
         self._torch = torch
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -42,7 +81,12 @@ class LocalTransformersModel:
         else:
             model_options["device_map"] = device_map
             model_options["low_cpu_mem_usage"] = True
-        self.model = AutoModelForCausalLM.from_pretrained(model_path, **model_options)
+        quantization_config = _build_quantization_config(quantization)
+        if quantization_config is not None:
+            model_options["quantization_config"] = quantization_config
+        if attn_implementation:
+            model_options["attn_implementation"] = attn_implementation
+        self.model = model_class.from_pretrained(model_path, **model_options)
         self.model.eval()
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token

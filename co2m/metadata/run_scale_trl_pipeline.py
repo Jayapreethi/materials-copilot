@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT))
 
 from generate_qwen_metadata import parse_json_response
 from ingest_postgres import parse_pdf
-from local_llm import LocalTransformersModel
+from local_llm import QUANTIZATION_CHOICES, LocalTransformersModel
 
 SCALE_PAGE_TERMS = re.compile(
     r"\b(?:scale[- ]?up|scale[- ]?down|laboratory|lab[- ]scale|bench[- ]scale|"
@@ -386,6 +386,8 @@ def main() -> None:
     parser.add_argument("--ollama-url", default="http://127.0.0.1:11434")
     parser.add_argument("--device-map", default="auto", help="Transformers device map, typically auto on HPC")
     parser.add_argument("--torch-dtype", choices=("auto", "bfloat16", "float16", "float32"), default="auto")
+    parser.add_argument("--quantization", choices=QUANTIZATION_CHOICES, default="none", help="Weight quantization for large checkpoints such as Llama 4 Scout")
+    parser.add_argument("--attn-implementation", default=None, help="Override attention implementation, e.g. sdpa or flex_attention for Llama 4")
     parser.add_argument("--allow-model-download", action="store_true", help="Allow Transformers to download a model if it is not cached locally")
     parser.add_argument("--max-chars", type=int, default=60000)
     parser.add_argument("--context-length", type=int, default=40960)
@@ -431,6 +433,8 @@ def main() -> None:
                 device_map=args.device_map,
                 torch_dtype=args.torch_dtype,
                 local_files_only=not args.allow_model_download,
+                quantization=args.quantization,
+                attn_implementation=args.attn_implementation,
             )
     for index, pdf_path in enumerate(pending, start=1):
         try:

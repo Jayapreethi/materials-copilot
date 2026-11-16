@@ -1,3 +1,5 @@
 # Install the cluster/vendor-compatible PyTorch build separately before this file.
-transformers>=4.45.0
+transformers>=4.51.0
 accelerate>=1.0.0
+# Optional, only needed for --quantization int4/int8 on Llama 4 (verify ARM64/Grace Hopper wheel availability):
+# bitsandbytes
