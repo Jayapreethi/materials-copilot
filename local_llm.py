@@ -97,6 +97,7 @@ class LocalTransformersModel:
         user_prompt: str,
         max_new_tokens: int = 2048,
         schema: dict[str, Any] | None = None,
+        min_new_tokens: int = 16,
     ) -> str:
         if schema is not None:
             system_prompt += (
@@ -124,6 +125,7 @@ class LocalTransformersModel:
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 max_new_tokens=max_new_tokens,
+                min_new_tokens=min(min_new_tokens, max_new_tokens),
                 do_sample=False,
                 pad_token_id=self.tokenizer.pad_token_id,
             )
